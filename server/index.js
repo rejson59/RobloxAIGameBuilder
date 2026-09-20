@@ -387,9 +387,9 @@ async function handleApi(req, res, url) {
     if (format === 'plugin' || format === 'studio') {
       const { body: buffer, warnings } = { body: Buffer.from(buildPlugin(project, {
         serverUrl: body.serverUrl || `http://127.0.0.1:${serverPort}`,
-        provider: body.provider,
-        model: body.model,
-        language: body.language,
+        provider: body.provider || project.meta?.provider,
+        model: body.model || project.meta?.model,
+        language: body.language || project.meta?.language,
         projectId: project.projectId || null,
       }), 'utf8'), warnings: [] };
       const filename = `${slugify(project.name || 'ai-game', 'ai-game')}.plugin.luau`;
@@ -487,6 +487,8 @@ export function createServer() {
       const source = buildPlugin(project, {
         serverUrl: `http://127.0.0.1:${serverPort}`,
         projectId,
+        provider: project.meta?.provider,
+        model: project.meta?.model,
         language: project.meta?.language || 'pl',
       });
       sendBuffer(res, 200, Buffer.from(source, 'utf8'), 'text/plain; charset=utf-8');

@@ -433,7 +433,6 @@ local function serverAlive()
 end
 
 local function pollJob(jobId, onProgress, isCancelled)
-	local lastMessage = ""
 	while true do
 		if isCancelled and isCancelled() then
 			request("POST", "/api/jobs/" .. jobId .. "/cancel", {})
@@ -443,11 +442,8 @@ local function pollJob(jobId, onProgress, isCancelled)
 		if not snapshot then
 			return nil, err
 		end
-		if snapshot.message ~= lastMessage or true then
-			lastMessage = snapshot.message or ""
-			if onProgress then
-				onProgress(snapshot.progress or 0, lastMessage, snapshot)
-			end
+		if onProgress then
+			onProgress(snapshot.progress or 0, snapshot.message or "", snapshot)
 		end
 		if snapshot.status == "done" then
 			return snapshot.project, nil
@@ -685,7 +681,7 @@ scroll.Size = UDim2.fromScale(1, 1)
 scroll.BackgroundColor3 = theme.bg
 scroll.BorderSizePixel = 0
 scroll.ScrollBarThickness = 6
-scroll.CanvasSize = UDim2.new(0, 0, 0, 940)
+scroll.CanvasSize = UDim2.new(0, 0, 0, 1010)
 scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 scroll.Parent = widget
 
@@ -709,7 +705,7 @@ local undoBtn = makeButton(sectionBuild, "Cofnij budowanie (Ctrl+Z)", UDim2.new(
 local buildStatus = makeLabel(sectionBuild, "Skrypty: " .. tostring(#(PROJECT.files or {})) .. " · mapa: gotowa do zbudowania", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 98), theme.muted)
 
 -- Sekcja 2: zmiany przez AI ---------------------------------------
-local sectionRefine = makeFrame(pad, UDim2.new(1, 0, 0, 176), UDim2.fromOffset(0, 204), theme.panel)
+local sectionRefine = makeFrame(pad, UDim2.new(1, 0, 0, 246), UDim2.fromOffset(0, 204), theme.panel)
 makeLabel(sectionRefine, "2. POPROŚ O ZMIANĘ (AI)", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
 local refineBox = Instance.new("TextBox")
 refineBox.Size = UDim2.new(1, -24, 0, 62)
@@ -727,12 +723,27 @@ refineBox.ClearTextOnFocus = false
 refineBox.Parent = sectionRefine
 corner(refineBox, 7)
 
-local refineBtn = makeButton(sectionRefine, "Zastosuj zmianę", UDim2.new(0.62, -18, 0, 32), UDim2.fromOffset(12, 98), true)
-local refineFullBtn = makeButton(sectionRefine, "Tylko kod", UDim2.new(0.38, -18, 0, 32), UDim2.fromOffset(190, 98), false)
-local refineStatus = makeLabel(sectionRefine, "Zmiana wymaga działającego lokalnego buildera (npm start).", UDim2.new(1, -20, 0, 34), UDim2.fromOffset(12, 136), theme.muted)
+-- Klucz API: trzymany wyłącznie w pamięci tej sesji Studio (nie jest zapisywany na dysku).
+local keyBox = Instance.new("TextBox")
+keyBox.Size = UDim2.new(1, -24, 0, 28)
+keyBox.Position = UDim2.fromOffset(12, 96)
+keyBox.BackgroundColor3 = Color3.fromRGB(12, 15, 28)
+keyBox.BorderSizePixel = 0
+keyBox.Font = Enum.Font.Code
+keyBox.TextSize = 11
+keyBox.TextColor3 = theme.text
+keyBox.PlaceholderText = "Klucz API (opcjonalnie, tylko ta sesja) – dla zmian przez AI"
+keyBox.Text = PROJECT_CONFIG.model.apiKey or ""
+keyBox.ClearTextOnFocus = false
+keyBox.Parent = sectionRefine
+corner(keyBox, 7)
+
+local refineBtn = makeButton(sectionRefine, "Zastosuj zmianę", UDim2.new(0.62, -18, 0, 32), UDim2.fromOffset(12, 132), true)
+local refineFullBtn = makeButton(sectionRefine, "Tylko kod", UDim2.new(0.38, -18, 0, 32), UDim2.fromOffset(190, 132), false)
+local refineStatus = makeLabel(sectionRefine, "Zmiana wymaga działającego lokalnego buildera (npm start).", UDim2.new(1, -20, 0, 60), UDim2.fromOffset(12, 172), theme.muted)
 
 -- Sekcja 3: postęp ------------------------------------------------
-local sectionProgress = makeFrame(pad, UDim2.new(1, 0, 0, 74), UDim2.fromOffset(0, 388), theme.panel)
+local sectionProgress = makeFrame(pad, UDim2.new(1, 0, 0, 74), UDim2.fromOffset(0, 458), theme.panel)
 local progressBar = makeFrame(sectionProgress, UDim2.new(1, -24, 0, 10), UDim2.fromOffset(12, 14), Color3.fromRGB(12, 15, 28))
 local progressFill = Instance.new("Frame")
 progressFill.Size = UDim2.fromScale(0, 1)
@@ -745,7 +756,7 @@ local cancelBtn = makeButton(sectionProgress, "Przerwij", UDim2.new(0, 96, 0, 26
 cancelBtn.Visible = false
 
 -- Sekcja 4: assety i zaślepki -------------------------------------
-local sectionAssets = makeFrame(pad, UDim2.new(1, 0, 0, 250), UDim2.fromOffset(0, 470), theme.panel)
+local sectionAssets = makeFrame(pad, UDim2.new(1, 0, 0, 250), UDim2.fromOffset(0, 540), theme.panel)
 makeLabel(sectionAssets, "3. ZAŚLEPKI ASSETÓW", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
 local scanBtn = makeButton(sectionAssets, "Znajdź brakujące assety", UDim2.new(1, -24, 0, 30), UDim2.fromOffset(12, 28), false)
 local assetList = Instance.new("ScrollingFrame")
@@ -765,7 +776,7 @@ assetListLayout.Parent = assetList
 local assetHint = makeLabel(sectionAssets, "Kliknij, aby znaleźć Decal/Sound/Mesh bez wartości (zaślepki po AI i importach).", UDim2.new(1, -20, 0, 30), UDim2.fromOffset(12, 166), theme.muted)
 
 -- Sekcja 5: darmowe assety + ikona ---------------------------------
-local sectionFree = makeFrame(pad, UDim2.new(1, 0, 0, 196), UDim2.fromOffset(0, 730), theme.panel)
+local sectionFree = makeFrame(pad, UDim2.new(1, 0, 0, 196), UDim2.fromOffset(0, 800), theme.panel)
 makeLabel(sectionFree, "4. DARMOWE ASSETY I IKONA", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
 local freeButtons = {}
 for index, asset in ipairs(FREE_ASSETS) do
@@ -853,11 +864,22 @@ local function doRefine()
 	task.spawn(function()
 		-- Zawsze serializujemy aktualny stan: kod z miejsca (jeśli zbudowane) + mapa projektu.
 		local payload = projectPayloadForRefine()
+		local key = keyBox.Text
+		if type(key) == "string" then
+			key = string.gsub(key, "%s", "")
+		else
+			key = ""
+		end
+		local config = {
+			provider = PROJECT_CONFIG.model.provider,
+			model = PROJECT_CONFIG.model.model,
+			baseUrl = PROJECT_CONFIG.model.baseUrl,
+			apiKey = (#key > 0) and key or PROJECT_CONFIG.model.apiKey,
+		}
 		local response, err = request("POST", "/api/refine", {
-			jobId = "plugin-" .. tostring(math.floor(os.clock() * 1000)),
 			project = payload,
 			instruction = instruction,
-			config = PROJECT_CONFIG.model,
+			config = config,
 			options = { language = PROJECT_CONFIG.language or "pl" },
 		})
 		if not response then
@@ -872,7 +894,11 @@ local function doRefine()
 		end)
 		if not project then
 			stopBusy("Nie udało się: " .. tostring(jobError), theme.err)
-			refineStatus.Text = tostring(jobError)
+			if string.find(string.lower(tostring(jobError)), "klucz") then
+				refineStatus.Text = "Wklej klucz API w polu powyżej (albo wypełnij go w aplikacji webowej przy eksporcie wtyczki)."
+			else
+				refineStatus.Text = tostring(jobError)
+			end
 			return
 		end
 
@@ -977,7 +1003,11 @@ end)
 task.spawn(function()
 	if serverAlive() then
 		progressLabel.Text = "Połączono z lokalnym builderem (" .. SERVER_URL .. ")."
-		refineStatus.Text = "Napisz, co zmienić – AI przepisze kod i zbuduje grę ponownie."
+		if PROJECT_CONFIG.model.apiKey and PROJECT_CONFIG.model.apiKey ~= "" then
+			refineStatus.Text = "Napisz, co zmienić – AI przepisze kod i zbuduje grę ponownie."
+		else
+			refineStatus.Text = "Napisz, co zmienić. Klucz API wklej w polu powyżej (pamiętany tylko w tej sesji Studia)."
+		end
 	else
 		progressLabel.Text = "Brak połączenia z builderem – budowanie i assety działają offline."
 		progressLabel.TextColor3 = theme.warn

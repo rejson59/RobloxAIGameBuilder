@@ -103,8 +103,8 @@ async function download(format) {
         project: state.project,
         format,
         serverUrl: $('plugin-server-url').value.trim() || undefined,
-        provider: state.mode === 'api' ? $('provider-select').value : undefined,
-        model: state.mode === 'api' ? $('model-input').value.trim() : undefined,
+        provider: $('provider-select').value || undefined,
+        model: $('model-input').value.trim() || undefined,
         language: $('language-select').value,
       }),
     });
@@ -982,9 +982,12 @@ function setupEvents() {
 }
 
 function updateModelSummary() {
+  const model = `${$('provider-select').value} · ${$('model-input').value || 'brak modelu'}`;
   $('model-summary').textContent = state.mode === 'demo'
     ? 'tryb demo — kliknij demo po lewej albo wpisz obby / td / arena / tycoon / horror'
-    : `${$('provider-select').value} · ${$('model-input').value || 'brak modelu'}`;
+    : model;
+  const info = $('plugin-model-info');
+  if (info) info.textContent = model;
 }
 
 /* ------------------------------------------------------------------ *
