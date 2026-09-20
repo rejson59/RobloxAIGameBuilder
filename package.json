@@ -1,0 +1,54 @@
+{
+  "name": "roblox-ai-game-builder",
+  "version": "2.0.0",
+  "private": false,
+  "description": "Buduj gry Roblox w Roblox Studio z własnymi kluczami API: opis -> design -> świat -> kod Luau -> wtyczka Studio z generatorem AI, biblioteką projektów i ikonami.",
+  "type": "module",
+  "main": "server/index.js",
+  "bin": {
+    "roblox-ai-builder": "server/cli.js"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "cli": "node server/cli.js",
+    "demo:export": "node server/cli.js --demo obby --out examples/sky-parkour-obby --formats zip,rbxmx,place,plugin,rojo",
+    "test": "node tests/run.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "roblox",
+    "roblox-studio",
+    "luau",
+    "rojo",
+    "ai",
+    "game-generator",
+    "openai",
+    "anthropic",
+    "gemini",
+    "bring-your-own-key"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "luau-parser": "^1.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rejson59/RobloxAIGameBuilder.git"
+  },
+  "homepage": "https://github.com/rejson59/RobloxAIGameBuilder#readme",
+  "bugs": {
+    "url": "https://github.com/rejson59/RobloxAIGameBuilder/issues"
+  },
+  "author": "rejson59",
+  "files": [
+    "server",
+    "public",
+    "tests",
+    "README.md",
+    "LICENSE",
+    ".github"
+  ]
+}

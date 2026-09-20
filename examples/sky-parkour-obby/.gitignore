@@ -1,0 +1,7 @@
+# Artefakty buildu – trzymamy tylko źródła
+*.rbxl
+*.rbxlx
+build/
+dist/
+exports/
+node_modules/

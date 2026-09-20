@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Roblox AI Game Builder</title>
+<meta name="description" content="Buduj pełne gry Roblox (Luau) z opisu, ulepszaj je rozmową z AI i wgrywaj do Roblox Studio jednym kliknięciem." />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div class="aurora"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">RBX</span>
+    <div>
+      <div class="brand-title">Roblox AI Game Builder</div>
+      <div class="brand-sub">opis → design → świat → kod Luau → Studio (wtyczka)</div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span class="pill" id="mode-pill">Tryb demo</span>
+    <span class="pill pill-ghost" id="health-pill">…</span>
+    <span class="pill pill-ghost" id="library-pill">biblioteka: 0</span>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="sidebar">
+    <section class="card">
+      <h2>1. Silnik AI</h2>
+      <div class="segmented" id="mode-switch">
+        <button class="seg active" data-mode="demo">Demo offline</button>
+        <button class="seg" data-mode="api">Własny klucz API</button>
+      </div>
+      <p class="hint" id="mode-hint">5 gotowych gier bez żadnego klucza — idealne na start i testy.</p>
+
+      <div id="api-fields" class="api-fields hidden">
+        <label class="field">
+          <span>Dostawca</span>
+          <select id="provider-select"></select>
+        </label>
+        <label class="field">
+          <span>Model</span>
+          <input id="model-input" list="model-list" placeholder="np. gpt-4.1-mini" autocomplete="off" />
+          <datalist id="model-list"></datalist>
+        </label>
+        <label class="field">
+          <span>Klucz API <em>tylko w Twojej przeglądarce → serwer lokalny</em></span>
+          <input id="api-key-input" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field hidden" id="base-url-field">
+          <span>Adres bazowy (OpenAI-compatible)</span>
+          <input id="base-url-input" placeholder="http://127.0.0.1:11434/v1" autocomplete="off" />
+        </label>
+        <div class="row">
+          <button class="btn btn-ghost" id="test-key-btn">Testuj klucz</button>
+          <button class="btn btn-ghost" id="list-models-btn">Pobierz modele</button>
+        </div>
+        <div class="test-result" id="test-result"></div>
+        <p class="hint">Klucz nie jest zapisywany na dysku ani wysyłany nigdzie poza wybranego dostawcę.</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2. Ustawienia gry</h2>
+      <label class="field">
+        <span>Skala projektu</span>
+        <div class="segmented small" id="scale-switch">
+          <button class="seg" data-scale="quick">Szybki</button>
+          <button class="seg active" data-scale="standard">Standard</button>
+          <button class="seg" data-scale="epic">Epicki</button>
+        </div>
+      </label>
+      <label class="field">
+        <span>Język tekstów w grze</span>
+        <select id="language-select">
+          <option value="pl" selected>Polski</option>
+          <option value="en">Angielski</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Must have <em>opcjonalnie, po przecinku</em></span>
+        <input id="musthave-input" placeholder="np. sklep, ranking, system poziomów" />
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="autorepair-input" checked />
+        <span>Auto-naprawa: model poprawia własne błędy wykryte przez walidator</span>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="stream-input" checked />
+        <span>Podgląd na żywo: pokazuj, jak model pisze kod (strumień)</span>
+      </label>
+      <label class="field">
+        <span>Limit wydatków na projekt (USD) <em>opcjonalnie</em></span>
+        <input id="max-cost-input" type="number" min="0" step="0.01" placeholder="np. 0.50 — pusty = bez limitu" />
+      </label>
+      <button class="btn btn-ghost full" id="import-btn">Wczytaj projekt (ai-builder.json)</button>
+      <input id="idea-file-input" type="file" accept="application/json,.json" class="hidden" />
+    </section>
+
+    <section class="card">
+      <h2>3. Gotowe demo</h2>
+      <div class="demo-list" id="demo-list"></div>
+    </section>
+
+    <section class="card">
+      <h2>4. Biblioteka projektów</h2>
+      <p class="hint" id="library-path">Zapisane projekty: —</p>
+      <div class="library-list" id="library-list"></div>
+      <button class="btn btn-ghost full" id="library-refresh">Odśwież listę</button>
+    </section>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <section class="content">
+    <section class="card">
+      <h2>Opisz swoją grę</h2>
+      <textarea id="idea-input" rows="5" spellcheck="false"
+        placeholder="np. symulator pszczół: zbieraj nektar, rozbudowuj ul, kupuj ulepszenia, ranking graczy"></textarea>
+      <div class="chips" id="example-chips"></div>
+      <div class="row row-between">
+        <div class="row">
+          <button class="btn btn-primary" id="generate-btn">Zbuduj grę</button>
+          <button class="btn btn-danger hidden" id="cancel-btn">Przerwij</button>
+        </div>
+        <span class="hint" id="model-summary">tryb demo — wybierz demo po lewej</span>
+      </div>
+    </section>
+
+    <section class="card hidden" id="progress-card">
+      <h2>Postęp</h2>
+      <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
+      <div class="row row-between" style="margin-bottom:8px">
+        <span class="hint" id="live-info">—</span>
+        <span class="hint" id="cost-info"></span>
+      </div>
+      <pre class="code code-live hidden" id="live-preview"></pre>
+      <div class="log" id="log"></div>
+    </section>
+
+    <section class="card hidden" id="result-card">
+      <div class="result-head">
+        <div class="result-title">
+          <img id="icon-preview" class="icon-preview" alt="Ikona gry" />
+          <div>
+            <h2 id="game-name">—</h2>
+            <p class="tagline" id="game-tagline"></p>
+          </div>
+        </div>
+        <div class="result-actions">
+          <button class="btn btn-primary" id="export-plugin-btn">Wtyczka do Studio</button>
+          <button class="btn" id="export-rbxmx-btn">Pobierz .rbxmx</button>
+          <button class="btn" id="export-place-btn">Pobierz .rbxlx</button>
+          <button class="btn" id="export-zip-btn">ZIP (Rojo)</button>
+          <button class="btn btn-ghost" id="download-icon-btn">Ikona PNG</button>
+        </div>
+      </div>
+
+      <div class="stats" id="stats"></div>
+      <div class="notice" id="notice"></div>
+
+      <div class="tabs" id="tabs">
+        <button class="tab active" data-tab="overview">Przegląd</button>
+        <button class="tab" data-tab="files">Pliki Luau <span id="tab-files-count"></span></button>
+        <button class="tab" data-tab="refine">Zmień grę (AI)</button>
+        <button class="tab" data-tab="studio">Wtyczka Studio</button>
+        <button class="tab" data-tab="audit">Audyt <span id="tab-audit-score"></span></button>
+        <button class="tab" data-tab="versions">Historia</button>
+        <button class="tab" data-tab="world">Świat</button>
+        <button class="tab" data-tab="arch">Architektura</button>
+        <button class="tab" data-tab="export">Jak uruchomić</button>
+      </div>
+
+      <div class="tab-panel" id="panel-overview"></div>
+
+      <div class="tab-panel hidden" id="panel-files">
+        <div class="file-layout">
+          <ul class="file-tree" id="file-tree"></ul>
+          <div class="code-wrap">
+            <div class="code-head">
+              <code id="code-path">—</code>
+              <div class="row">
+                <button class="btn btn-ghost btn-small" id="edit-file-btn">Edytuj</button>
+                <button class="btn btn-ghost btn-small" id="copy-code-btn">Kopiuj</button>
+                <button class="btn btn-ghost btn-small" id="download-file-btn">Pobierz plik</button>
+              </div>
+            </div>
+            <pre class="code" id="code-readonly"><code id="code-view"></code></pre>
+            <div class="edit-wrap hidden" id="edit-wrap">
+              <textarea id="edit-area" spellcheck="false"></textarea>
+              <div class="row row-between">
+                <span class="hint">Zapis = nowa wersja projektu. Wtyczka w Studiu z włączonym <em>Live sync</em> podmieni tylko ten skrypt.</span>
+                <div class="row">
+                  <button class="btn btn-ghost btn-small" id="edit-cancel-btn">Anuluj</button>
+                  <button class="btn btn-primary btn-small" id="save-file-btn">Zapisz zmiany</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-panel hidden" id="panel-refine">
+        <div class="chat" id="refine-history"></div>
+        <div class="chat-input">
+          <textarea id="refine-input" rows="3" placeholder="np. dodaj sklep z ulepszeniami i ranking graczy&#10;albo: zwiększ trudność fal i dodaj bossa na 10. fali"></textarea>
+          <div class="row row-between">
+            <span class="hint" id="refine-hint">Zmiany robi ten sam model AI, którego użyłeś do generowania (wymaga klucza API).</span>
+            <button class="btn btn-primary" id="refine-btn">Zastosuj zmianę</button>
+          </div>
+        </div>
+        <div class="chips" id="refine-chips"></div>
+      </div>
+
+      <div class="tab-panel hidden" id="panel-studio">
+        <div class="studio-grid">
+          <div>
+            <h3>Krok 1 — pobierz wtyczkę z wbudowaną grą</h3>
+            <p class="hint">Wtyczka nie łączy się z internetem, żeby zbudować grę: cały kod Luau i mapa są w środku pliku.
+              Połączenie z tym serwerem jest potrzebne tylko do funkcji „Zmień grę (AI)” w panelu wtyczki —
+              tam też wklejasz klucz API (trzymany wyłącznie w pamięci sesji Studia, nigdy nie jest zapisywany w pliku wtyczki).</p>
+            <p class="hint">Wtyczka zapamięta dostawcę i model z panelu po lewej: <code id="plugin-model-info">—</code></p>
+            <div class="row">
+              <button class="btn btn-primary" id="plugin-download">Pobierz .plugin.luau</button>
+              <button class="btn" id="plugin-copy">Kopiuj kod wtyczki</button>
+              <button class="btn btn-ghost" id="plugin-refresh">Odśwież kod</button>
+            </div>
+            <h3 style="margin-top:18px">Krok 2 — wgraj do Roblox Studio</h3>
+            <ol class="steps">
+              <li>Roblox Studio → <strong>Plugins → Plugins Folder</strong> (otworzy folder).</li>
+              <li>Skopiuj plik <code>*.plugin.luau</code> do tego folderu.</li>
+              <li>Zrestartuj Studio. Na pasku pojawi się <strong>Roblox AI Game Builder</strong>:
+                <br>• <em>Buduj grę</em> — wstawia mapę i skrypty w otwarte miejsce (z Ctrl+Z),
+                <br>• <em>AI Builder</em> — panel: zmiany przez AI, skan zaślepek, darmowe assety, ikona.</li>
+              <li>Żeby działały zmiany przez AI: w Studio <em>Game Settings → Security → Allow HTTP Requests</em>.</li>
+            </ol>
+          </div>
+          <div>
+            <h3>Adres serwera dla wtyczki</h3>
+            <label class="field">
+              <span>Używany w kodzie wtyczki i w panelu Studio</span>
+              <input id="plugin-server-url" value="http://127.0.0.1:5173" />
+            </label>
+            <p class="hint">Wtyczka działa w Twoim Studiu na tej samej maszynie, dlatego używa
+              <code>127.0.0.1</code> (nie adresu podglądu w chmurze).</p>
+            <h3 style="margin-top:18px">Assety: znaczniki z gry</h3>
+            <p class="hint">Kod może zawierać znaczniki typu <code>"placeholder:coin"</code>.
+              Wtyczka podmienia je jednym kliknięciem na darmowe assety z katalogu (przycisk
+              „Podmień znaczniki placeholder:…” w sekcji 3 panelu Studia).</p>
+            <div id="project-tags" class="tag-list"></div>
+            <label class="field">
+              <span>Katalog darmowych assetów</span>
+              <input id="asset-search" placeholder="np. laser, horror, metal, ui_click" />
+            </label>
+            <div id="asset-list" class="asset-list"></div>
+
+            <h3 style="margin-top:18px">Podgląd kodu wtyczki</h3>
+            <pre class="code code-small"><code id="plugin-source">Kliknij „Odśwież kod”, aby wczytać źródło wtyczki…</code></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-panel hidden" id="panel-audit"></div>
+
+      <div class="tab-panel hidden" id="panel-versions">
+        <p class="hint">Każde wygenerowanie, zmiana przez AI i ręczna edycja pliku to nowa wersja.
+          Rollback tworzy kolejną wersję, więc nic nie ginie — a jeśli w Studiu włączysz <em>Live sync</em>,
+          miejsce zaktualizuje się samo.</p>
+        <div id="versions-list" class="versions-list"></div>
+      </div>
+
+      <div class="tab-panel hidden" id="panel-world"></div>
+      <div class="tab-panel hidden" id="panel-arch"></div>
+      <div class="tab-panel hidden" id="panel-export"></div>
+    </section>
+  </section>
+</main>
+
+<div class="toasts" id="toasts"></div>
+<footer class="footer">
+  Roblox AI Game Builder · projekt Rojo + .rbxmx / .rbxlx + wtyczka Studio z generatorem AI · Twoje klucze, Twoje gry
+</footer>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+# Przykładowa konfiguracja GitHub Actions.
+# Aby ją włączyć: skopiuj ten plik do .github/workflows/ci.yml
+# (commit pliku workflow wymaga uprawnienia "workflows" w tokenie git).
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Testy (bez sieci i bez kluczy API)
+        run: npm test
+
+      - name: Eksport projektu demo (kontrola końca ścieżki produkcji)
+        run: npm run demo:export
