@@ -1,0 +1,14 @@
+node_modules/
+npm-debug.log*
+.DS_Store
+.env
+.env.*
+*.local
+
+# Artefakty generowane lokalnie przez CLI (poza katalogiem examples/)
+ai-game/
+moja-gra/
+gra/
+tests/.tmp/
+*.rbxl
+*.rbxlx

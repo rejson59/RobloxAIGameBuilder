@@ -1,0 +1,180 @@
+{
+  "lighting": {
+    "ClockTime": 15,
+    "Ambient": "#6E7B94",
+    "OutdoorAmbient": "#8A94A8",
+    "Brightness": 2,
+    "GlobalShadows": true,
+    "Technology": "ShadowMap",
+    "FogEnd": 1200,
+    "FogColor": "#20233A"
+  },
+  "world": {
+    "name": "World",
+    "className": "Folder",
+    "children": [
+      {
+        "className": "Part",
+        "name": "LobbyBase",
+        "properties": {
+          "Size": [
+            44,
+            2,
+            44
+          ],
+          "Position": [
+            0,
+            -1,
+            0
+          ],
+          "Color": "#2B2F45",
+          "Material": "SmoothPlastic",
+          "Anchored": true,
+          "CanCollide": true
+        }
+      },
+      {
+        "className": "SpawnLocation",
+        "name": "LobbySpawn",
+        "properties": {
+          "Size": [
+            12,
+            1,
+            12
+          ],
+          "Position": [
+            0,
+            1,
+            0
+          ],
+          "Color": "#4FC3F7",
+          "Material": "Neon",
+          "Duration": 0,
+          "Anchored": true
+        }
+      },
+      {
+        "className": "Part",
+        "name": "RulesBoard",
+        "properties": {
+          "Size": [
+            26,
+            12,
+            1
+          ],
+          "Position": [
+            0,
+            8,
+            -20
+          ],
+          "Color": "#141828",
+          "Material": "SmoothPlastic",
+          "Anchored": true
+        },
+        "children": [
+          {
+            "className": "SurfaceGui",
+            "name": "BoardGui",
+            "properties": {
+              "Face": "Front",
+              "CanvasSize": [
+                800,
+                400
+              ],
+              "LightInfluence": 0
+            },
+            "children": [
+              {
+                "className": "TextLabel",
+                "name": "Rules",
+                "properties": {
+                  "Size": [
+                    1,
+                    1
+                  ],
+                  "BackgroundTransparency": 1,
+                  "TextScaled": true,
+                  "Font": "GothamBold",
+                  "TextColor3": "#8FE3FF",
+                  "Text": "NEON SKYWAY OBBY  |  Skacz po platformach, zbieraj monety, dotrzyj do zielonej mety. R = reset, H = HUD."
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "className": "Folder",
+        "name": "GeneratedLevel",
+        "properties": {}
+      },
+      {
+        "className": "Folder",
+        "name": "Decor",
+        "properties": {},
+        "children": [
+          {
+            "className": "Part",
+            "name": "GlowPillarLeft",
+            "properties": {
+              "Size": [
+                2,
+                16,
+                2
+              ],
+              "Position": [
+                -18,
+                8,
+                -16
+              ],
+              "Color": "#7E57C2",
+              "Material": "Neon",
+              "Anchored": true
+            },
+            "children": [
+              {
+                "className": "PointLight",
+                "name": "Glow",
+                "properties": {
+                  "Color": "#9C7BFF",
+                  "Brightness": 3,
+                  "Range": 40
+                }
+              }
+            ]
+          },
+          {
+            "className": "Part",
+            "name": "GlowPillarRight",
+            "properties": {
+              "Size": [
+                2,
+                16,
+                2
+              ],
+              "Position": [
+                18,
+                8,
+                -16
+              ],
+              "Color": "#4FC3F7",
+              "Material": "Neon",
+              "Anchored": true
+            },
+            "children": [
+              {
+                "className": "PointLight",
+                "name": "Glow",
+                "properties": {
+                  "Color": "#7FE7FF",
+                  "Brightness": 3,
+                  "Range": 40
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
