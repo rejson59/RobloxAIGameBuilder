@@ -22,6 +22,12 @@ import { createZip, readZipEntries, crc32 } from '../server/zip.js';
 import { encodePng, readPngHeader } from '../server/png.js';
 import { renderThumbnail, thumbnailFilename } from '../server/thumbnail.js';
 import { startJob, getJob, jobSnapshot, cancelJob, subscribeJob, listJobs, runningJobs } from '../server/jobs.js';
+import { BudgetExceededError, CostTracker, budgetFor, costOf, formatUsd, rateFor } from '../server/pricing.js';
+import { auditProject } from '../server/audit.js';
+import { CATALOG, assetForTag, isPlaceholderValue, searchAssets, starterAssets, tagOf, tagsUsedInProject } from '../server/assets.js';
+import { studioTargetForPath } from '../server/studioPaths.js';
+import { diffSince, listVersions, restoreVersion, saveFile } from '../server/projects.js';
+import { chatStream } from '../server/providers.js';
 import { newProjectId, saveProject, listProjects, loadProject, loadVersion, deleteProject, projectsDir } from '../server/projects.js';
 import { buildRbxmx, buildRojoProject, planFileTree } from '../server/rbxmx.js';
 import { buildPlugin, toLuau, buildPluginPayload } from '../server/plugin.js';
@@ -29,7 +35,7 @@ import { assembleFiles, exportAs, projectSlug } from '../server/exporters.js';
 import { validateProject, normalisePath, isValidPath } from '../server/validate.js';
 import { DEMOS, getDemo, listDemos } from '../server/games.js';
 import { generateGame, planBatches, refineProject, autoRepairProject } from '../server/pipeline.js';
-import { publicProviders, getProvider } from '../server/providers.js';
+import { publicProviders, getProvider as providerById } from '../server/providers.js';
 import { parseJsonLoose, slugify, safeInstanceName, eulerToMatrix, parseCFrame } from '../server/util.js';
 import { createServer } from '../server/index.js';
 
@@ -417,8 +423,8 @@ await test('rejestr dostawców jest kompletny i spójny', () => {
     if (provider.id !== 'custom') assert.ok(provider.baseUrl.length > 0, `${provider.id}: brak baseUrl`);
     if (provider.needsKey) assert.ok(provider.keyUrl || provider.id === 'custom', `${provider.id}: brak linku do kluczy`);
   }
-  assert.equal(getProvider('ollama').needsKey, false);
-  assert.equal(getProvider('nope'), null);
+  assert.equal(providerById('ollama').needsKey, false);
+  assert.equal(providerById('nope'), null);
 });
 
 /* ================================================================== */
@@ -637,7 +643,280 @@ await test('autoRepairProject: czysty projekt nie potrzebuje naprawy', async () 
 });
 
 /* ================================================================== */
-section('12. serwer HTTP – pełny przepływ');
+section('12. koszty, audyt i katalog assetów');
+
+await test('rateFor/costOf: znane modele, darmowe lokalne i nieznane (szacunek)', () => {
+  const mini = rateFor('openai', 'gpt-4.1-mini');
+  assert.equal(mini.known, true);
+  assert.equal(mini.input, 0.4);
+  assert.equal(rateFor('openai', 'o4-mini').known, true);
+  assert.equal(rateFor('anthropic', 'claude-sonnet-4-5').output, 15);
+  assert.equal(rateFor('ollama', 'qwen2.5-coder:14b').known, true);
+  assert.equal(rateFor('openai', 'model-ktory-nie-istnieje').known, false);
+  assert.equal(rateFor('custom', 'cokolwiek').known, true);      // lokalny endpoint = bez opłat
+
+  const cost = costOf({ provider: 'openai', model: 'gpt-4.1-mini', inputTokens: 100000, outputTokens: 50000 });
+  assert.ok(Math.abs(cost.usd - 0.12) < 1e-9, `oczekiwano $0.12, jest ${cost.usd}`);
+  assert.equal(costOf({ provider: 'ollama', model: 'x', inputTokens: 1e6, outputTokens: 1e6 }).usd, 0);
+  assert.equal(formatUsd(0), '$0');
+  assert.equal(formatUsd(0.0004), '$0.0004');
+  assert.equal(formatUsd(0.42), '$0.420');
+});
+
+await test('CostTracker: kumuluje zużycie i twardo egzekwuje budżet', () => {
+  const tracker = new CostTracker({ provider: 'openai', model: 'gpt-4.1-mini' });
+  tracker.add({ inputTokens: 10000, outputTokens: 10000 });
+  tracker.add({ inputTokens: 10000, outputTokens: 10000 });
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.calls, 2);
+  assert.equal(snapshot.inputTokens, 20000);
+  assert.ok(snapshot.usd > 0);
+
+  const limited = new CostTracker({ provider: 'openai', model: 'gpt-4.1-mini', budget: 0.01 });
+  assert.throws(() => limited.add({ inputTokens: 1000000, outputTokens: 0 }), BudgetExceededError);
+
+  const previous = process.env.MAX_COST_USD;
+  process.env.MAX_COST_USD = '0.25';
+  assert.equal(budgetFor({}), 0.25);
+  assert.equal(budgetFor({ maxCostUsd: 3 }), 3);
+  if (previous === undefined) delete process.env.MAX_COST_USD;
+  else process.env.MAX_COST_USD = previous;
+  assert.equal(budgetFor({}), null);
+});
+
+await test('auditProject: zdrowe dema mają wysoką ocenę i brak błędów', () => {
+  for (const demo of DEMOS) {
+    const audit = auditProject(demo);
+    assert.equal(audit.counts.errors, 0, `${demo.id}: ${JSON.stringify(audit.checks.filter((c) => c.level === 'error'))}`);
+    assert.ok(audit.score >= 90, `${demo.id} ma tylko ${audit.score}/100`);
+    assert.ok(audit.checks.some((c) => c.id === 'entry' && c.level === 'pass'), `${demo.id}: brak wykrytego skryptu startowego`);
+  }
+});
+
+await test('auditProject: łapie typowe błędy całego projektu', () => {
+  const broken = {
+    name: 'Broken Game',
+    files: [
+      { path: 'src/server/Game.server.luau', content: 'local X = require(game.ReplicatedStorage.Shared.NieMa)\nprint("start")\n' },
+      { path: 'src/client/Hud.client.luau', content: 'local store = game:GetService("DataStoreService")\nlocal remotes = game:GetService("ReplicatedStorage")' },
+    ],
+    plan: { files: [{ path: 'src/shared/Config.luau' }], remoteEvents: [{ name: 'Damage' }] },
+    design: { systems: [{ name: 'Ekonomia' }] },
+  };
+  const audit = auditProject(broken);
+  const ids = audit.checks.filter((c) => c.level !== 'pass').map((c) => `${c.id}:${c.level}`);
+  assert.ok(ids.includes('plan.missing:error'), 'nie wykryto brakującego pliku z planu');
+  assert.ok(ids.includes('requires:error'), 'nie wykryto require() do nieistniejącego modułu');
+  assert.ok(ids.includes('remotes:error'), 'nie wykryto brakującego RemoteEventu');
+  assert.ok(ids.includes('authority:error'), 'nie wykryto DataStore na kliencie');
+  assert.ok(audit.score < 60, `zepsuty projekt nie powinien dostać ${audit.score}/100`);
+});
+
+await test('auditProject: brak skryptu startowego to błąd krytyczny', () => {
+  const audit = auditProject({ name: 'X', files: [{ path: 'src/shared/Config.luau', content: 'return {}\n' }], plan: { files: [{ path: 'src/shared/Config.luau' }] } });
+  const entry = audit.checks.find((c) => c.id === 'entry');
+  assert.equal(entry.level, 'error');
+});
+
+await test('assets: znaczniki placeholder:<tag> i dopasowanie do katalogu', () => {
+  assert.ok(CATALOG.length >= 25, 'katalog assetów jest za mały');
+  assert.equal(tagOf('placeholder:coin'), 'coin');
+  assert.equal(tagOf('rbxassetid://123'), null);
+  assert.equal(isPlaceholderValue('placeholder:ui_click'), true);
+  assert.equal(isPlaceholderValue('rbxassetid://0'), true);
+  assert.equal(isPlaceholderValue('rbxassetid://9114222000'), false);
+
+  assert.match(assetForTag('coin').rbxAssetId, /^rbxassetid:\/\/\d+$/);
+  assert.equal(assetForTag('coin').kind, 'sound');
+  assert.equal(assetForTag('neon_grid').kind, 'texture');
+  assert.ok(assetForTag('ui_click'), 'klik UI musi mieć asset');
+  assert.equal(assetForTag('totalnie-nieznany-tag'), null, 'nieznany tag nie może losowo dopasować assetu');
+
+  const horror = starterAssets('horror').map((a) => a.tags[0]);
+  assert.ok(horror.includes('ambient_horror'), 'starter horrora bez atmosfery');
+  assert.ok(horror.includes('monster'));
+  assert.ok(starterAssets('obby').length >= 3);
+  assert.ok(searchAssets({ q: 'laser' }).length >= 1);
+  assert.ok(searchAssets({ kind: 'texture' }).every((a) => a.kind === 'texture'));
+
+  const used = tagsUsedInProject({
+    genre: 'obby',
+    files: [{ path: 'src/server/A.server.luau', content: 'sound.SoundId = "placeholder:coin"\nimg.Image = "placeholder:neon_grid"\n' }],
+  });
+  assert.equal(used.length, 2);
+  assert.ok(used.find((entry) => entry.tag === 'coin').asset);
+});
+
+await test('studioPaths: pliki trafiają do właściwych instancji', () => {
+  const cases = [
+    ['src/server/Bootstrap.server.luau', 'ServerScriptService', 'Script', 'ServerScriptService.Bootstrap'],
+    ['src/client/Hud.client.luau', 'StarterPlayer', 'LocalScript', 'StarterPlayer.StarterPlayerScripts.Hud'],
+    ['src/shared/Config.luau', 'ReplicatedStorage', 'ModuleScript', 'ReplicatedStorage.Shared.Config'],
+    ['src/server/systems/Economy.luau', 'ServerScriptService', 'ModuleScript', 'ServerScriptService.systems.Economy'],
+  ];
+  for (const [path, service, className, full] of cases) {
+    const target = studioTargetForPath(path);
+    assert.equal(target.service, service, path);
+    assert.equal(target.className, className, path);
+    assert.equal(target.studioPath, full, path);
+    assert.equal(target.path, undefined, `${path}: pole "path" musi zostać wolne dla ścieżki pliku`);
+  }
+});
+
+/* ================================================================== */
+section('13. live sync: rewizje, diff, edycja plików, rollback');
+
+await test('saveProject/saveFile: każdy zapis podbija rewizję i tworzy wersję', () => {
+  const id = newProjectId('Sync Test');
+  const first = saveProject(structuredClone(sampleProject), { id, note: 'start' });
+  assert.equal(first.revision, 1);
+  const second = saveFile(id, 'src/shared/Config.luau', 'return { Version = 2 }\n');
+  assert.equal(second.revision, 2);
+  assert.equal(loadProject(id).revision, 2);
+  assert.equal(loadProject(id).files.find((f) => f.path === 'src/shared/Config.luau').content, 'return { Version = 2 }\n');
+  const third = saveFile(id, 'src/client/Extra.client.luau', '-- nowy plik\n');
+  assert.equal(third.revision, 3);
+  assert.equal(loadProject(id).files.length, sampleProject.files.length + 1);
+  assert.equal(saveFile('nie-ma-takiego', 'x', 'y'), null);
+  deleteProject(id);
+});
+
+await test('diffSince: zwraca tylko zmienione pliki i potrafi kazać przebudować wszystko', () => {
+  const id = newProjectId('Diff Test');
+  saveProject(structuredClone(sampleProject), { id });
+  saveFile(id, 'src/shared/Config.luau', 'return { Changed = true }\n');
+
+  const diff = diffSince(id, 1);
+  assert.equal(diff.full, false);
+  assert.equal(diff.revision, 2);
+  assert.equal(diff.changed.length, 1);
+  assert.equal(diff.changed[0].path, 'src/shared/Config.luau');
+  assert.equal(diff.changed[0].action, 'replace');
+  assert.equal(diff.changed[0].service, 'ReplicatedStorage');
+  assert.equal(diff.changed[0].studioPath, 'ReplicatedStorage.Shared.Config');
+  assert.equal(diff.changed[0].className, 'ModuleScript');
+  assert.ok(diff.changed[0].content.includes('Changed'));
+  assert.equal(diff.unchanged, sampleProject.files.length - 1);
+
+  // Usunięcie pliku też jest widoczne.
+  saveFile(id, 'src/client/Hud.client.luau', null);
+  const diff2 = diffSince(id, 1);
+  assert.ok(diff2.removed.some((entry) => entry.path === 'src/client/Hud.client.luau'), 'brak informacji o usuniętym pliku');
+  assert.equal(diff2.removed[0].className, 'LocalScript');
+
+  // Nieznana rewizja → pełna synchronizacja (klient musi przebudować wszystko).
+  const full = diffSince(id, 999);
+  assert.equal(full.full, true);
+  assert.ok(full.changed.length >= 3);
+  assert.equal(diffSince('nie-ma-takiego', 1), null);
+  deleteProject(id);
+});
+
+await test('restoreVersion: rollback tworzy nową wersję i zachowuje historię', () => {
+  const id = newProjectId('Rollback Test');
+  saveProject(structuredClone(sampleProject), { id });
+  saveFile(id, 'src/shared/Config.luau', 'return { Broken = true }\n');
+
+  const versions = listVersions(id);
+  assert.equal(versions.length, 2);
+  assert.equal(versions[0].revision, 2);
+
+  const restored = restoreVersion(id, 1);
+  assert.equal(restored.revision, 3, 'rollback ma dodać nową rewizję, nie kasować historii');
+  assert.equal(restored.restoredFrom, 1);
+  const project = loadProject(id);
+  assert.ok(!project.files.find((f) => f.path === 'src/shared/Config.luau').content.includes('Broken'));
+  assert.equal(listVersions(id).length, 3);
+  assert.equal(restoreVersion(id, 99), null);
+  deleteProject(id);
+});
+
+/* ================================================================== */
+section('14. strumieniowanie odpowiedzi (atrapa dostawców)');
+
+await test('chatStream: OpenAI, Anthropic i Gemini (różne dialekty SSE)', async () => {
+  const http2 = (await import('node:http')).default;
+  const server = http2.createServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const body = JSON.parse(raw || '{}');
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (req.url.includes('/messages')) {
+      assert.equal(body.stream, true, 'Anthropic musi dostać stream: true');
+      res.write('data: ' + JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 111 } } }) + '\n\n');
+      for (const piece of ['{"files"', ': [{"path"', ':"a.luau"}]}']) {
+        res.write('data: ' + JSON.stringify({ type: 'content_block_delta', delta: { text: piece } }) + '\n\n');
+      }
+      res.write('data: ' + JSON.stringify({ type: 'message_delta', usage: { output_tokens: 77 } }) + '\n\n');
+    } else if (req.url.includes(':streamGenerateContent')) {
+      res.write('data: ' + JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"ok"' }] } }], usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 5 } }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ candidates: [{ content: { parts: [{ text: ':true}' }] } }] }) + '\n\n');
+    } else {
+      assert.equal(body.stream, true, 'protokół OpenAI musi dostać stream: true');
+      for (const piece of ['{"a"', ':1}']) {
+        res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: piece } }] }) + '\n\n');
+      }
+      res.write('data: ' + JSON.stringify({ choices: [], usage: { prompt_tokens: 500, completion_tokens: 25 } }) + '\n\n');
+      res.write('data: [DONE]\n\n');
+    }
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const openai = await chatStream({ provider: 'openai', apiKey: 'k', model: 'gpt-4.1-mini', baseUrl: `${base}/v1`, system: 's', messages: [{ role: 'user', content: 'u' }] });
+  assert.equal(openai.text, '{"a":1}');
+  assert.equal(openai.usage.inputTokens, 500);
+  assert.equal(openai.usage.outputTokens, 25);
+  assert.equal(openai.streamed, true);
+
+  const claude = await chatStream({ provider: 'anthropic', apiKey: 'k', model: 'claude-sonnet-4-5', baseUrl: base, system: 's', messages: [{ role: 'user', content: 'u' }] });
+  assert.equal(claude.text, '{"files": [{"path":"a.luau"}]}');
+  assert.equal(claude.usage.inputTokens, 111);
+  assert.equal(claude.usage.outputTokens, 77);
+
+  const gemini = await chatStream({ provider: 'gemini', apiKey: 'k', model: 'gemini-2.5-flash', baseUrl: `${base}/v1beta`, system: 's', messages: [{ role: 'user', content: 'u' }] });
+  assert.equal(gemini.text, '{"ok":true}');
+  assert.equal(gemini.usage.inputTokens, 20);
+
+  // Delty trafiają do UI w kolejności.
+  const collected = [];
+  await chatStream({ provider: 'openai', apiKey: 'k', model: 'gpt-4.1-mini', baseUrl: `${base}/v1`, system: 's', messages: [{ role: 'user', content: 'u' }], onDelta: (piece, full) => collected.push(full) });
+  assert.deepEqual(collected, ['{"a"', '{"a":1}']);
+
+  server.close();
+});
+
+await test('chatStream: brak zużycia tokenów -> szacunek z długości tekstu', async () => {
+  const http2 = (await import('node:http')).default;
+  const server = http2.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'x'.repeat(400) } }] }) + '\n\n');
+    res.write('data: [DONE]\n\n');
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const out = await chatStream({
+    provider: 'custom', apiKey: 'k', model: 'm',
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+    system: 'y'.repeat(200), messages: [{ role: 'user', content: 'z'.repeat(200) }],
+  });
+  assert.equal(out.usage.approximated, true);
+  assert.equal(out.usage.outputTokens, 100);
+  assert.equal(out.usage.inputTokens, 100);
+  server.close();
+});
+
+await test('getProvider: aliasy (gemini, claude, lokalny) i nieznane id', () => {
+  assert.equal(providerById('gemini').id, 'google');
+  assert.equal(providerById('claude').id, 'anthropic');
+  assert.equal(providerById('GPT').id, 'openai');
+  assert.equal(providerById('local').id, 'ollama');
+  assert.equal(providerById('nieznany-provider'), null);
+});
+
+/* ================================================================== */
+section('15. serwer HTTP – pełny przepływ');
 
 const server = createServer();
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -819,7 +1098,7 @@ await test('nieznany endpoint zwraca 404 JSON, a statyki działają', async () =
 await new Promise((resolve) => server.close(resolve));
 
 /* ================================================================== */
-section('13. CLI – eksport offline do katalogu');
+section('16. CLI – eksport offline do katalogu');
 
 await test('npm run demo:export produkuje kompletny zestaw plików', async () => {
   const { execFileSync } = await import('node:child_process');

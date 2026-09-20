@@ -8,15 +8,27 @@ grywalny projekt Roblox**: design, szkielet mapy, kod Luau i eksport jednym klik
 
 * **Wtyczka do Roblox Studio z pełnym UI** — buduje grę w otwartym miejscu, a potem **zmieniasz ją rozmową z AI**
   prosto z panelu w Studiu („dodaj sklep”, „zwiększ trudność”, „dodaj bossa na 10. fali”).
+* **Live sync** — wtyczka pilnuje rewizji projektu i **dociąga do Studia tylko zmienione skrypty**.
+  Edytujesz kod w aplikacji (albo w edytorze w UI) i po ~2 s masz zmianę w otwartym miejscu, bez przebudowy mapy.
+* **Naprawa błędów z testu w Studiu** — wtyczka nasłuchuje `LogService`, więc po Twoim Play ma listę realnych
+  błędów runtime i jednym przyciskiem wysyła je do modelu jako zadanie naprawcze.
+* **Audyt całego projektu** — ocena 0-100 i lista sprawdzeń: pokrycie planu, `require()` do istniejących modułów,
+  RemoteEventy używane po obu stronach, skrypt startowy, autorytet serwera, systemy z designu.
 * **Auto-naprawa kodu** — po wygenerowaniu walidator wskazuje błędy, a model sam przepisuje wadliwe pliki
   (do 2 rund) i projekt jest walidowany ponownie.
+* **Podgląd na żywo i licznik kosztów** — widzisz, jak model pisze kod (strumień ze wszystkich 10 dostawców),
+  a po zakończeniu koszt projektu w USD; opcjonalny **limit wydatków** zatrzymuje generowanie w trakcie.
+* **Znaczniki assetów** — kod może zawierać `"placeholder:coin"`; wtyczka podmienia je na darmowe assety
+  z katalogu (30 pozycji) jednym kliknięciem.
 * **Biblioteka projektów z wersjami** — każda generacja i każda zmiana zapisuje się w `.projects/`
   (ostatnie 5 wersji), więc do gry wracasz jednym kliknięciem, a zmianę możesz cofnąć.
 * **Generator ikon (PNG 512×512)** — proceduralna ikona gry w palecie dopasowanej do gatunku, gotowa do wgrania na Roblox.
+* **Historia wersji i rollback** — każda generacja, zmiana i edycja pliku to nowa wersja; przywrócenie działa
+  z aplikacji i z panelu Studia (rollback tworzy kolejną wersję, więc nic nie ginie).
 * **5 gier demo offline** — Obby, Tower Defense, Arena PvP, Tycoon i Horror, w całości lokalnie, bez klucza API.
 * **Zero zależności** w runtime — czysty Node.js (>=18), jeden `npm start`.
 * **Własne klucze (BYOK)** — klucz nie opuszcza Twojej maszyny, nie jest nigdzie zapisywany.
-* **Walidator jakości** — sprawdza przestarzałe API, placeholdery, brakujące `return`, spójność świata i **kompiluje każdy plik Luau prawdziwym parserem Luau** w testach (54 testy).
+* **Walidator jakości** — sprawdza przestarzałe API, placeholdery, brakujące `return`, spójność świata i **kompiluje każdy plik Luau prawdziwym parserem Luau** w testach (68 testów).
 
 ---
 
@@ -56,6 +68,10 @@ Trzy drogi, wszystkie prowadzą do grywalnego miejsca:
 | **Zaślepki assetów** | Skanuje miejsce i wypisuje `Decal`/`Sound`/`MeshId`/`ImageLabel` bez wartości (typowe po imporcie). Klik = zaznaczenie instancji. |
 | **Darmowe assety** | Jednym kliknięciem wstawia dźwięki i tekstury z biblioteki Robloxa (gotowe do podmiany). |
 | **Ikona gry** | Pobiera proceduralną ikonę PNG 512×512 i zapisuje ją w folderze wtyczek (do wgrania na create.roblox.com). |
+| **Live sync** | Przełącznik: co 2,5 s sprawdza rewizję projektu i podmienia tylko zmienione skrypty (z historią zmian). |
+| **Napraw błędy z Play** | Po teście gry wysyła zebrane błędy runtime do modelu i przebudowuje miejsce z poprawkami. |
+| **Podmień znaczniki assetów** | Zamienia `"placeholder:coin"`, `"placeholder:neon_grid"` itd. na darmowe assety z katalogu. |
+| **Historia wersji** | Lista wersji projektu z przyciskiem „Przywróć” — cofa nieudaną zmianę bez wychodzenia ze Studia. |
 
 Żeby działały funkcje AI, w Studiu musi być włączone **Game Settings → Security → Allow HTTP Requests**
 (serwer budujący działa na `127.0.0.1:5173`, czyli na Twojej maszynie). Budowanie gry i assety działają **bez** połączenia.
@@ -90,6 +106,56 @@ więc efekt widzisz bez wychodzenia z Robloxa.
 
 Kontrakt zmian jest celowo bezpieczny: nowe pliki mogą powstawać tylko w `src/{server,client,shared}/`,
 ścieżki spoza projektu są odrzucane, a każdy plik przechodzi linter i parser Luau.
+
+---
+
+## Live sync: edytujesz tutaj, widzisz w Studiu
+
+1. W aplikacji wygeneruj projekt i pobierz wtyczkę.
+2. W Studiu kliknij **Buduj grę**, a potem zaznacz **Live sync** w sekcji 1 panelu.
+3. Zmieniaj cokolwiek: w zakładce **Pliki Luau** włącz **Edytuj**, popraw kod i kliknij **Zapisz zmiany**
+   (albo poproś AI o zmianę, albo przywróć starszą wersję z zakładki **Historia**).
+4. Wtyczka zauważy nową rewizję i podmieni **tylko ten skrypt** — mapa i reszta kodu zostają nietknięte.
+
+Działa to też w drugą stronę: jeśli dopiszesz kod w Studiu, projekt w aplikacji nadal możesz rozwijać
+(wtyczka wysyła aktualny kod do modelu przy każdej zmianie przez AI).
+
+## Audyt projektu (ocena 0-100)
+
+Zakładka **Audyt** pokazuje sprawdzenia, których nie zrobi żaden linter pojedynczego pliku:
+
+| Sprawdzenie | Co wykrywa |
+| --- | --- |
+| Pokrycie planu | pliki z planu, których model nie napisał (i pliki spoza planu) |
+| `require()` | odwołania do modułów, które nie istnieją — najczęstsza przyczyna błędów po uruchomieniu |
+| RemoteEventy | nazwy z planu, których nie ma w kodzie albo są tylko po jednej stronie |
+| Skrypt startowy | brak `*.server.luau`, który spina systemy (gra po prostu nic nie robi) |
+| Autorytet serwera | `DataStoreService`/`ServerStorage` w skrypcie klienta |
+| Systemy z designu | systemy opisane w designie bez śladu w kodzie |
+| Niedokończone | pliki praktycznie puste i znaczniki TODO/FIXME |
+
+Wynik trafia też do biblioteki, więc od razu widzisz, które projekty wymagają uwagi.
+
+## Koszty i budżet
+
+* Każde zadanie zapisuje zużycie tokenów i **szacunkowy koszt** (cennik w `server/pricing.js`, edytowalny).
+* W statystykach projektu i na liście biblioteki widzisz kwotę; w trakcie generowania licznik rośnie po każdej odpowiedzi modelu.
+* **Limit wydatków**: pole „Limit wydatków na projekt (USD)” w UI albo `MAX_COST_USD=0.5 npm start`.
+  Po przekroczeniu generowanie zatrzymuje się z jasnym komunikatem (projekt częściowy zostaje w zadaniu).
+* Strumieniowanie pokazuje, co model pisze (i ile znaków już napisał) — zamiast pustego paska postępu.
+
+## Assety: znaczniki zamiast zgadywanych ID
+
+Model **nie wpisuje** `rbxassetid://…` (walidator tego zabrania), ale może zostawić znacznik:
+
+```lua
+coinSound.SoundId = "placeholder:coin"        -- dźwięk monety
+decal.Texture = "placeholder:neon_grid"       -- świecąca siatka
+```
+
+Wtyczka ma przycisk **„Podmień znaczniki placeholder:…”**: skanuje miejsce, dopasowuje tagi do katalogu
+darmowych assetów (`server/assets.js`, 30 pozycji: dźwięki UI, ruchu, atmosfera, tekstury) i podstawia ID.
+Nic nie dzieje się bez Twojego kliknięcia, a katalog możesz dowolnie edytować.
 
 ---
 
@@ -189,6 +255,14 @@ Pełna lista flag: `node server/cli.js --help`.
 | POST | `/api/library/:id/delete` | usunięcie projektu |
 | POST | `/api/export` | `{project, format: zip\|rbxmx\|place\|plugin\|rojo, serverUrl?}` → plik do pobrania |
 | GET | `/api/thumbnail?project=…&size=512` | proceduralna ikona gry (PNG) |
+| POST | `/api/audit` | `{project}` → audyt całego projektu (ocena + lista sprawdzeń) |
+| GET | `/api/projects/:id/diff?since=N` | zmienione pliki od rewizji N (live sync wtyczki) |
+| GET | `/api/library/:id/versions` | historia wersji projektu |
+| POST | `/api/library/:id/restore` | `{index}` → rollback (jako nowa wersja) |
+| POST | `/api/library/:id/file` | `{path, content}` → edycja pojedynczego pliku |
+| GET | `/api/assets?q=&kind=&genre=` | katalog darmowych assetów + starter dla gatunku |
+| GET | `/api/assets/used?project=` | znaczniki `placeholder:` użyte w projekcie |
+| GET | `/api/pricing?provider=&model=` | stawki i przykładowy koszt |
 | POST | `/api/validate`, `/api/test`, `/api/models`, `/api/chat` | walidacja, test klucza, modele, surowy czat |
 
 Przykład: wygeneruj grę i śledź postęp z konsoli
@@ -209,6 +283,10 @@ curl -s localhost:5173/api/jobs/$JOB | head -c 400
 server/
   index.js        serwer HTTP: UI, zadania, biblioteka, eksporty, ikony (zero zależności)
   jobs.js         kolejka zadań generate/refine + strumienie SSE dla wtyczki i UI
+  audit.js        audyt całego projektu (plan vs kod, require, remotes, autorytet serwera)
+  assets.js       katalog darmowych assetów + konwencja znaczników placeholder:<tag>
+  pricing.js      cennik modeli, licznik kosztów i budżet (MAX_COST_USD)
+  studioPaths.js  mapowanie plików Luau na instancje Studia (używane przez live sync)
   projects.js     biblioteka .projects/ z wersjonowaniem (5 wersji na projekt)
   pipeline.js     orkiestracja: design → world → plan → code → walidacja → auto-naprawa → refine
   providers.js    klienci LLM (3 protokoły, 10 dostawców, BYOK)
@@ -225,7 +303,8 @@ server/
   games.js        rejestr dem offline
   demos/          obby.js, towerDefense.js, arena.js, tycoon.js, horror.js (pełne gry w Luau)
 public/           interfejs webowy (bez frameworków): generator, czat zmian, biblioteka, ikony
-tests/run.js      54 testy: zip, png, ikony, rbxmx, wtyczka, walidator, zadania, biblioteka, dema, HTTP, CLI
+tests/run.js      68 testów: zip, png, rbxmx, wtyczka, walidator, audyt, koszty, assety,
+                  zadania, biblioteka, live sync (diff/rollback), strumieniowanie, HTTP, CLI
 plugin/           miejsce na lokalnie zainstalowaną wtyczkę (Twoje pliki)
 examples/         przykładowy wygenerowany projekt (Rojo + ZIP + .rbxmx + .plugin.luau)
 .projects/        biblioteka projektów tworzona w runtime (poza repo)
@@ -243,7 +322,8 @@ npm test
 CI: gotową konfigurację GitHub Actions znajdziesz w `.github/ci.yml.example`
 (skopiuj do `.github/workflows/ci.yml`, jeśli chcesz uruchamiać testy na push/PR).
 
-Testy nie wykonują żadnych połączeń sieciowych i nie potrzebują klucza API. Sprawdzają m.in. round-trip
+Testy nie wykonują żadnych połączeń sieciowych i nie potrzebują klucza API (strumieniowanie jest
+testowane na lokalnych atrapach trzech protokołów SSE). Sprawdzają m.in. round-trip
 ZIP-a, poprawność nagłówka i CRC ikony PNG, XML `.rbxmx`, escapowanie literałów Luau we wtyczce,
 obecność panelu UI (refine, zaślepki, assety, ikona), kolejkę zadań i strumienie SSE, wersjonowanie
 biblioteki, pełny przepływ HTTP oraz to, że **każdy plik Luau z dem i wygenerowana wtyczka przechodzą
@@ -268,7 +348,9 @@ kontrolę składni.
 
 * AI pisze gry z **prymitywów** (Part, GUI, dźwięki proceduralne) — nie wygeneruje customowych modeli 3D ani animacji R15 kręconych w Blenderze.
 * Modele czasem się mylą: dlatego każde generowanie kończy walidator, auto-naprawa i (w razie potrzeby) refine. Zawsze przetestuj grę w Studio przed publikacją.
-* Zmiany przez AI wymagają dwóch rzeczy naraz: działającego `npm start` na tej samej maszynie co Studio i włączonego `Allow HTTP Requests`.
+* Zmiany przez AI, live sync, historia wersji i podmiana assetów wymagają działającego `npm start` na tej samej maszynie co Studio i włączonego `Allow HTTP Requests`. Budowanie gry, skan zaślepków i ikona działają offline.
+* Katalog assetów to publiczne, darmowe pozycje z biblioteki Robloxa — biblioteka się zmienia, więc wtyczka zawsze pokazuje, co wstawi, i nic nie robi bez kliknięcia. ID możesz podmienić w `server/assets.js`.
+* Ceny w `server/pricing.js` to szacunek na podstawie publicznych cenników — jeśli Twój rachunek się różni, popraw tabelę (albo nie ustawiaj limitu).
 * Wielkie projekty („epic”) kosztują więcej tokenów — to Twoje konto u dostawcy.
 * `luau-parser` to zewnętrzna biblioteka tylko do testów (devDependency); runtime pozostaje bez zależności.
 

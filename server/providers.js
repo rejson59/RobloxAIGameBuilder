@@ -128,8 +128,24 @@ export const PROVIDERS = [
   },
 ];
 
+// Potoczne nazwy, które użytkownicy wpisują w konfiguracji/CLI.
+const PROVIDER_ALIASES = {
+  gemini: 'google',
+  googleai: 'google',
+  claude: 'anthropic',
+  gpt: 'openai',
+  chatgpt: 'openai',
+  local: 'ollama',
+  llama: 'groq',
+  openrouter: 'openrouter',
+};
+
 export function getProvider(id) {
-  return PROVIDERS.find((p) => p.id === id) || null;
+  const key = String(id || '').toLowerCase().trim();
+  const direct = PROVIDERS.find((p) => p.id === key);
+  if (direct) return direct;
+  const alias = PROVIDER_ALIASES[key];
+  return alias ? PROVIDERS.find((p) => p.id === alias) || null : null;
 }
 
 export function publicProviders() {
@@ -241,12 +257,153 @@ export async function chat(opts) {
   }
 }
 
-function buildUrl({ provider, baseUrl, model }) {
+/* ------------------------------------------------------------------ *
+ * Strumieniowanie (SSE) – podgląd pisania kodu na żywo.
+ * Obsługujemy wszystkie trzy protokoły; jeśli dostawca nie poda zużycia
+ * tokenów w strumieniu, szacujemy je z długości tekstu.
+ * ------------------------------------------------------------------ */
+
+/** Odczytuje strumień SSE z odpowiedzi fetch i zwraca kolejne obiekty JSON. */
+async function* sseLines(response) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let index;
+    while ((index = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, index).trim();
+      buffer = buffer.slice(index + 1);
+      if (!line || line.startsWith(':')) continue;
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') return;
+      try {
+        yield JSON.parse(payload);
+      } catch {
+        /* pomijamy niepełne linie */
+      }
+    }
+  }
+}
+
+/**
+ * Strumieniowane uzupełnienie czatu.
+ *
+ * @param {object} opts  jak w `chat()`, dodatkowo:
+ * @param {(text:string, full:string)=>void} [opts.onDelta]  wywoływane dla każdego fragmentu
+ * @returns {Promise<{text:string, usage:object, streamed:boolean}>}
+ */
+export async function chatStream(opts) {
+  const provider = getProvider(opts.provider);
+  if (!provider) throw new ProviderError(`Nieznany dostawca: ${opts.provider}`, { provider: opts.provider });
+  const baseUrl = (opts.baseUrl || provider.baseUrl || '').trim();
+  if (!baseUrl) throw new ProviderError('Brak adresu bazowego (baseUrl) dla tego dostawcy.', { provider: provider.id });
+  if (provider.needsKey && !opts.apiKey) {
+    throw new ProviderError(`Podaj klucz API dla ${provider.label}.`, { provider: provider.id, status: 401 });
+  }
+  const model = (opts.model || provider.defaultModel || '').trim();
+  if (!model) throw new ProviderError('Brak nazwy modelu.', { provider: provider.id });
+
+  let url = buildUrl({ provider, baseUrl, model, stream: true });
+  const { headers, body } = buildRequest({
+    provider,
+    apiKey: opts.apiKey,
+    model,
+    system: opts.system,
+    messages: opts.messages,
+    maxTokens: opts.maxTokens ?? 8192,
+    temperature: opts.temperature ?? 0.6,
+    jsonMode: false,
+  });
+
+  if (provider.protocol === 'gemini') {
+    url = `${url}?alt=sse`;
+    body.generationConfig = { ...(body.generationConfig || {}), maxOutputTokens: opts.maxTokens ?? 8192 };
+  } else if (provider.protocol === 'anthropic') {
+    body.stream = true;
+  } else {
+    body.stream = true;
+    // OpenAI zgodzi się na podsumowanie zużycia; inne bramki po prostu to zignorują.
+    body.stream_options = { include_usage: true };
+  }
+
+  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: opts.signal });
+  if (!res.ok) {
+    const detail = await readError(res);
+    throw friendlyHttpError(res.status, provider.label, detail);
+  }
+  if (!res.body) throw new ProviderError('Dostawca nie zwrócił strumienia.', { provider: provider.id });
+
+  let text = '';
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let sawUsage = false;
+
+  for await (const event of sseLines(res)) {
+    let piece = '';
+    if (provider.protocol === 'anthropic') {
+      if (event.type === 'message_start') {
+        inputTokens = event.message?.usage?.input_tokens ?? inputTokens;
+        sawUsage = true;
+      } else if (event.type === 'content_block_delta') {
+        piece = event.delta?.text || '';
+      } else if (event.type === 'message_delta') {
+        outputTokens = event.usage?.output_tokens ?? outputTokens;
+        sawUsage = true;
+      } else if (event.type === 'error') {
+        throw new ProviderError(event.error?.message || 'Błąd strumienia dostawcy.', { provider: provider.label });
+      }
+    } else if (provider.protocol === 'gemini') {
+      piece = (event.candidates?.[0]?.content?.parts || []).map((part) => part.text || '').join('');
+      if (event.usageMetadata) {
+        inputTokens = event.usageMetadata.promptTokenCount ?? inputTokens;
+        outputTokens = event.usageMetadata.candidatesTokenCount ?? outputTokens;
+        sawUsage = true;
+      }
+    } else {
+      piece = event.choices?.[0]?.delta?.content ?? '';
+      if (event.usage) {
+        inputTokens = event.usage.prompt_tokens ?? inputTokens;
+        outputTokens = event.usage.completion_tokens ?? outputTokens;
+        sawUsage = true;
+      }
+      if (event.error) {
+        throw new ProviderError(event.error.message || 'Błąd strumienia dostawcy.', { provider: provider.label });
+      }
+    }
+    if (piece) {
+      text += piece;
+      opts.onDelta?.(piece, text);
+    }
+  }
+
+  // Część bramek nie przysyła zużycia w strumieniu – szacujemy z długości tekstu,
+  // żeby licznik kosztów i budżet nadal działały.
+  const approximate = !sawUsage || (outputTokens === 0 && text.length > 0);
+  if (approximate) {
+    outputTokens = Math.max(outputTokens, Math.ceil(text.length / 4));
+    if (!inputTokens) {
+      const promptChars = String(opts.system || '').length + (opts.messages || []).reduce((sum, m) => sum + String(m.content || '').length, 0);
+      inputTokens = Math.ceil(promptChars / 4);
+    }
+  }
+
+  return {
+    text,
+    usage: { inputTokens, outputTokens, approximated: approximate },
+    streamed: true,
+    provider: provider.id,
+    model,
+  };
+}
+
+function buildUrl({ provider, baseUrl, model, stream = false }) {
   switch (provider.protocol) {
     case 'anthropic':
       return joinUrl(baseUrl, '/messages');
     case 'gemini':
-      return joinUrl(baseUrl, `/models/${encodeURIComponent(model)}:generateContent`);
+      // Strumień i zwykłe zapytanie mają różne metody w API Google.
+      return joinUrl(baseUrl, `/models/${encodeURIComponent(model)}:${stream ? 'streamGenerateContent' : 'generateContent'}`);
     case 'openai':
     default:
       return joinUrl(baseUrl, '/chat/completions');

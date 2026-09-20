@@ -350,6 +350,10 @@ async function openLibraryProject(id) {
 function showProgress() {
   $('progress-card').classList.remove('hidden');
   $('log').innerHTML = '';
+  $('live-preview').classList.add('hidden');
+  $('live-preview').textContent = '';
+  $('live-info').textContent = '—';
+  $('cost-info').textContent = '';
   setProgress(0.03);
 }
 
@@ -371,13 +375,20 @@ function buildConfig() {
 }
 
 function buildOptions() {
+  const maxCost = Number($('max-cost-input').value);
   return {
     scale: state.scale,
     language: $('language-select').value,
     mustHave: $('musthave-input').value.split(',').map((s) => s.trim()).filter(Boolean),
     autoRepair: $('autorepair-input').checked,
+    stream: $('stream-input').checked,
+    maxCostUsd: Number.isFinite(maxCost) && maxCost > 0 ? maxCost : undefined,
   };
 }
+
+const usd = (value) => (typeof value === 'number' && Number.isFinite(value)
+  ? (value === 0 ? '$0' : value < 0.01 ? `$${value.toFixed(4)}` : value < 1 ? `$${value.toFixed(3)}` : `$${value.toFixed(2)}`)
+  : '—');
 
 /** Opens the SSE stream for a job and wires the handlers. */
 function streamJob(jobId, { onDone } = {}) {
@@ -418,13 +429,30 @@ function handleEvent(event, onDone) {
       if (typeof event.progress === 'number') setProgress(event.progress);
       if (event.message) logLine(event.message, 'ok');
       break;
+    case 'delta': {
+      // Podgląd na żywo: pokazujemy ogon tego, co właśnie pisze model.
+      const live = $('live-preview');
+      live.classList.remove('hidden');
+      live.textContent = event.tail || '';
+      $('live-info').textContent = `model pisze… ${event.chars.toLocaleString('pl-PL')} znaków`;
+      break;
+    }
     case 'warn':
       logLine(event.message, 'warn');
       break;
-    case 'done':
+    case 'done': {
       logLine(event.message, 'ok');
       setProgress(1);
+      $('live-info').textContent = 'gotowe';
+      const bits = [];
+      if (event.costLabel) bits.push(`koszt: ${event.costLabel}`);
+      if (typeof event.auditScore === 'number') bits.push(`audyt: ${event.auditScore}/100`);
+      if (bits.length) $('cost-info').textContent = bits.join(' · ');
+      if (typeof event.auditScore === 'number' && event.auditScore < 70) {
+        logLine(`Audyt ocenił projekt na ${event.auditScore}/100 – zajrzyj w zakładkę „Audyt”.`, 'warn');
+      }
       break;
+    }
     case 'error':
       logLine(event.message, 'err');
       if (event.detail) logLine(String(event.detail).slice(0, 500), 'warn');
@@ -575,6 +603,8 @@ function renderProject(project, projectId) {
 
   renderNotice(project);
   renderStats(project);
+  renderAudit(project);
+  renderVersions();
   renderOverview(project);
   renderFiles(project);
   renderWorld(project);
@@ -602,13 +632,16 @@ function renderNotice(project) {
     parts.push(`<div class="ok-box">Auto-naprawa: model poprawił błędy wykryte przez walidator i przebudował projekt.</div>`);
   }
   if (state.projectId) {
-    parts.push(`<div class="hint">Zapisane w bibliotece jako <code>${escapeHtml(state.projectId)}</code> — możesz wrócić do tego projektu później (zakładka „Biblioteka” po lewej).</div>`);
+    const revision = project.revision ? ` · rewizja <code>${project.revision}</code>` : '';
+    parts.push(`<div class="hint">Zapisane w bibliotece jako <code>${escapeHtml(state.projectId)}</code>${revision} — możesz wrócić do tego projektu później (zakładka „Biblioteka” po lewej).</div>`);
   }
   $('notice').innerHTML = parts.join('');
 }
 
 function renderStats(project) {
   const stats = project.validation?.stats || {};
+  const cost = project.cost || project.usage || {};
+  const audit = project.audit || {};
   const items = [
     ['Pliki Luau', stats.files ?? project.files?.length ?? 0],
     ['Linii kodu', stats.lines ?? '—'],
@@ -616,6 +649,8 @@ function renderStats(project) {
     ['Rozmiar', stats.bytes ? `${(stats.bytes / 1024).toFixed(1)} kB` : '—'],
     ['Model', project.meta?.model || (project.demo ? 'demo offline' : '—')],
     ['Tokeny', project.usage?.calls ? `${project.usage.inputTokens} / ${project.usage.outputTokens}` : '—'],
+    ['Koszt', cost.usd || cost.usd === 0 ? usd(cost.usd) : '—'],
+    ['Audyt', audit.score !== undefined ? `${audit.score}/100` : '—'],
   ];
   $('stats').innerHTML = items
     .map(([label, value]) => `<div class="stat"><b>${escapeHtml(String(value))}</b><span>${escapeHtml(label)}</span></div>`)
@@ -676,6 +711,98 @@ function fileKind(path) {
   return 'plik';
 }
 
+function renderAudit(project) {
+  const audit = project.audit;
+  $('tab-audit-score').textContent = audit?.score !== undefined ? `${audit.score}` : '';
+  if (!audit) {
+    $('panel-audit').innerHTML = '<p class="hint">Ten projekt nie ma jeszcze raportu audytu (starsze zapisy). Kliknij „Odśwież”, aby go policzyć.</p>'
+      + '<button class="btn btn-ghost" id="run-audit-btn">Policz audyt teraz</button>';
+    $('run-audit-btn').addEventListener('click', runAudit);
+    return;
+  }
+  const klass = audit.score >= 90 ? 'good' : audit.score >= 70 ? 'mid' : 'bad';
+  const order = { error: 0, warn: 1, info: 2, pass: 3 };
+  const checks = [...audit.checks].sort((a, b) => order[a.level] - order[b.level]);
+  const items = checks.map((check) => `
+    <div class="audit-item ${check.level}">
+      <div class="title">${check.level === 'pass' ? '✓' : check.level === 'error' ? '✕' : check.level === 'warn' ? '!' : 'i'} ${escapeHtml(check.title)}</div>
+      ${check.detail ? `<div class="detail">${escapeHtml(check.detail)}</div>` : ''}
+      ${check.hint ? `<div class="hint-line">→ ${escapeHtml(check.hint)}</div>` : ''}
+    </div>`).join('');
+  $('panel-audit').innerHTML = `
+    <div class="audit-head">
+      <div class="audit-score ${klass}">${audit.score}</div>
+      <div>
+        <p>${escapeHtml(audit.summary)}</p>
+        <p class="hint">Audyt sprawdza spójność CAŁEGO projektu: pokrycie planu, wymagania modułów,
+          RemoteEventy, punkt startowy, autorytet serwera i systemy z designu. Walidator (zakładka Przegląd)
+          patrzy na pojedyncze pliki — audyt patrzy na całość.</p>
+        <button class="btn btn-ghost btn-small" id="run-audit-btn">Przelicz audyt</button>
+      </div>
+    </div>
+    <div class="audit-list">${items}</div>`;
+  $('run-audit-btn').addEventListener('click', runAudit);
+}
+
+async function runAudit() {
+  if (!state.project) return;
+  try {
+    const data = await api('/api/audit', { method: 'POST', body: JSON.stringify({ project: state.project }) });
+    state.project.audit = data.audit;
+    renderAudit(state.project);
+    renderStats(state.project);
+    toast(`Audyt: ${data.audit.score}/100`, data.audit.counts.errors ? 'err' : 'ok');
+  } catch (err) {
+    toast(`Audyt: ${err.message}`, 'err');
+  }
+}
+
+async function renderVersions() {
+  const box = $('versions-list');
+  if (!state.projectId) {
+    box.innerHTML = '<p class="hint">Historia wersji dotyczy projektów z biblioteki (demo też się tam zapisuje).</p>';
+    return;
+  }
+  try {
+    const data = await api(`/api/library/${state.projectId}/versions`);
+    if (!data.versions.length) {
+      box.innerHTML = '<p class="hint">Brak zapisanych wersji.</p>';
+      return;
+    }
+    box.innerHTML = '';
+    for (const version of data.versions) {
+      const row = document.createElement('div');
+      row.className = `version-row${version.revision === data.revision ? ' current' : ''}`;
+      row.innerHTML = `
+        <div class="meta">
+          <strong>Wersja ${version.index}${version.revision === data.revision ? ' (aktualna)' : ''}</strong>
+          <span>${escapeHtml(version.note || '')} · ${new Date(version.at).toLocaleString('pl-PL')} · ${version.files} plików · rewizja ${version.revision ?? '?'}</span>
+        </div>`;
+      if (version.revision !== data.revision) {
+        const button = document.createElement('button');
+        button.className = 'btn btn-ghost btn-small';
+        button.textContent = 'Przywróć';
+        button.addEventListener('click', () => restoreVersion(version.index));
+        row.appendChild(button);
+      }
+      box.appendChild(row);
+    }
+  } catch (err) {
+    box.innerHTML = `<p class="hint">Nie udało się pobrać historii: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function restoreVersion(index) {
+  try {
+    const data = await api(`/api/library/${state.projectId}/restore`, { method: 'POST', body: JSON.stringify({ index }) });
+    renderProject(data.project, data.project.projectId);
+    toast(`Przywrócono wersję ${index} (nowa rewizja ${data.revision}).`, 'ok');
+    loadLibrary();
+  } catch (err) {
+    toast(`Rollback: ${err.message}`, 'err');
+  }
+}
+
 function renderFiles(project) {
   const tree = $('file-tree');
   tree.innerHTML = '';
@@ -702,6 +829,7 @@ function renderFiles(project) {
 }
 
 function showFile(file) {
+  closeEditor();
   if (!file) {
     $('code-view').textContent = '';
     $('code-path').textContent = '—';
@@ -709,6 +837,46 @@ function showFile(file) {
   }
   $('code-path').textContent = `${file.path}  (${fileKind(file.path)})`;
   $('code-view').innerHTML = highlightLuau(file.content || '');
+}
+
+function openEditor() {
+  const file = state.project?.files?.find((f) => f.path === state.selectedFile);
+  if (!file) return;
+  $('edit-area').value = file.content || '';
+  $('edit-wrap').classList.remove('hidden');
+  $('code-readonly').classList.add('hidden');
+  $('edit-file-btn').textContent = 'Podgląd z kolorowaniem';
+}
+
+function closeEditor() {
+  if (!$('edit-wrap')) return;
+  $('edit-wrap').classList.add('hidden');
+  $('code-readonly').classList.remove('hidden');
+  $('edit-file-btn').textContent = 'Edytuj';
+}
+
+async function saveEditedFile() {
+  if (!state.projectId) {
+    toast('Zapisz projekt w bibliotece (wygeneruj go ponownie), żeby móc edytować pliki.', 'err');
+    return;
+  }
+  const path = state.selectedFile;
+  const content = $('edit-area').value;
+  try {
+    const data = await api(`/api/library/${state.projectId}/file`, { method: 'POST', body: JSON.stringify({ path, content, note: `edycja pliku ${path.split('/').pop()}` }) });
+    const file = state.project.files.find((f) => f.path === path);
+    if (file) file.content = content;
+    state.project.revision = data.revision;
+    state.project.audit = data.audit;
+    renderAudit(state.project);
+    renderStats(state.project);
+    renderVersions();
+    showFile(file);
+    toast(`Zapisano (rewizja ${data.revision}). Wtyczka z Live sync podmieni ten skrypt w Studiu.`, 'ok');
+    loadLibrary();
+  } catch (err) {
+    toast(`Zapis nie udał się: ${err.message}`, 'err');
+  }
 }
 
 function renderWorld(project) {
@@ -789,6 +957,50 @@ function renderChat(statusMessage) {
   history.scrollTop = history.scrollHeight;
 }
 
+/* ---------- assety ---------- */
+async function loadProjectTags() {
+  const box = $('project-tags');
+  if (!state.projectId) {
+    box.innerHTML = '<span class="hint">Znaczniki pokazują się dla projektów z biblioteki.</span>';
+    return;
+  }
+  try {
+    const data = await api(`/api/assets/used?project=${encodeURIComponent(state.projectId)}`);
+    if (!data.tags.length) {
+      box.innerHTML = '<span class="hint">Ten projekt nie używa znaczników — kod buduje dźwięki i UI proceduralnie.</span>';
+      return;
+    }
+    box.innerHTML = data.tags.map((entry) => `
+      <div class="tag-chip">
+        <code>placeholder:${escapeHtml(entry.tag)}</code>
+        <span>${entry.asset ? escapeHtml(entry.asset.note) : 'brak dopasowania w katalogu'}${entry.files.length ? ` · ${entry.files.length} plik` : ''}</span>
+      </div>`).join('');
+  } catch (err) {
+    box.innerHTML = `<span class="hint">${escapeHtml(err.message)}</span>`;
+  }
+}
+
+async function loadAssets(query = '') {
+  const box = $('asset-list');
+  try {
+    const genre = state.project?.genre || state.project?.design?.genre || '';
+    const data = await api(`/api/assets?q=${encodeURIComponent(query)}&genre=${encodeURIComponent(genre)}`);
+    if (!data.assets.length) {
+      box.innerHTML = '<p class="hint">Nic nie znaleziono — spróbuj innego słowa (np. „laser”, „ui”, „metal”).</p>';
+      return;
+    }
+    box.innerHTML = data.assets.slice(0, 24).map((asset) => `
+      <div class="asset-row">
+        <div>
+          <strong>${escapeHtml(asset.note)}</strong><br />
+          <code>${escapeHtml(asset.rbxAssetId)}</code> · ${escapeHtml(asset.kind)} · tag: <code>${escapeHtml(asset.tags[0])}</code>
+        </div>
+      </div>`).join('');
+  } catch (err) {
+    box.innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
+  }
+}
+
 /* ---------- plugin panel ---------- */
 async function loadPluginSource() {
   if (!state.project) {
@@ -823,10 +1035,15 @@ function setupTabs() {
     tab.addEventListener('click', () => {
       for (const other of document.querySelectorAll('.tab')) other.classList.remove('active');
       tab.classList.add('active');
-      for (const name of ['overview', 'files', 'refine', 'studio', 'world', 'arch', 'export']) {
+      for (const name of ['overview', 'files', 'refine', 'studio', 'audit', 'versions', 'world', 'arch', 'export']) {
         $(`panel-${name}`).classList.toggle('hidden', name !== tab.dataset.tab);
       }
-      if (tab.dataset.tab === 'studio' && !state.pluginSource) loadPluginSource();
+      if (tab.dataset.tab === 'studio') {
+        if (!state.pluginSource) loadPluginSource();
+        loadProjectTags();
+        if (!$('asset-list').children.length) loadAssets();
+      }
+      if (tab.dataset.tab === 'versions') renderVersions();
     });
   }
 }
@@ -893,6 +1110,13 @@ function setupEvents() {
       toast(`Ikona: ${err.message}`, 'err');
     }
   });
+  $('edit-file-btn').addEventListener('click', () => {
+    if ($('edit-wrap').classList.contains('hidden')) openEditor();
+    else closeEditor();
+  });
+  $('edit-cancel-btn').addEventListener('click', closeEditor);
+  $('save-file-btn').addEventListener('click', saveEditedFile);
+  $('asset-search').addEventListener('input', (event) => loadAssets(event.target.value));
   $('plugin-download').addEventListener('click', () => download('plugin'));
   $('plugin-refresh').addEventListener('click', loadPluginSource);
   $('plugin-copy').addEventListener('click', async () => {

@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { slugify } from './util.js';
+import { studioTargetForPath } from './studioPaths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DIR = path.join(__dirname, '..', '.projects');
@@ -48,8 +49,10 @@ export function newProjectId(name) {
 export function saveProject(project, { id, note = 'nowa wersja' } = {}) {
   const projectId = id || newProjectId(project.name);
   const existing = readStore(projectId);
+  const revision = (existing?.revision || 0) + 1;
   const version = {
     at: new Date().toISOString(),
+    revision,
     note,
     files: project.files,
     world: project.world,
@@ -61,18 +64,138 @@ export function saveProject(project, { id, note = 'nowa wersja' } = {}) {
   const versions = [version, ...(existing?.versions || [])].slice(0, MAX_VERSIONS);
   const store = {
     id: projectId,
-    updatedAt: new Date().toISOString(),
-    createdAt: existing?.createdAt || new Date().toISOString(),
+    revision,
+    updatedAt: version.at,
+    createdAt: existing?.createdAt || version.at,
     name: project.name,
     genre: project.genre || project.design?.genre || '',
     tagline: project.tagline || '',
     summary: project.summary || '',
     stats: project.validation?.stats || {},
+    cost: project.cost || project.usage || null,
+    auditScore: project.audit?.score ?? null,
     project,
     versions,
   };
   writeStore(store);
-  return { id: projectId, versions: versions.length, path: fileFor(projectId) };
+  return { id: projectId, revision, versions: versions.length, path: fileFor(projectId) };
+}
+
+/** Wersje projektu (do panelu „historia” i rollbacku we wtyczce). */
+export function listVersions(id) {
+  const store = readStore(id);
+  if (!store) return [];
+  return (store.versions || []).map((version, index) => ({
+    index,
+    revision: version.revision ?? null,
+    at: version.at,
+    note: version.note || '',
+    files: version.files?.length || 0,
+    name: version.name || store.name,
+  }));
+}
+
+/**
+ * Zapisuje pojedynczy plik projektu (edytor w UI / zewnętrzna synchronizacja).
+ * Tworzy nową wersję i podbija rewizję, więc wtyczka może dociągnąć zmianę.
+ */
+export function saveFile(id, path, content, { note = 'edycja pliku' } = {}) {
+  const store = readStore(id);
+  if (!store) return null;
+  const project = store.project;
+  const files = Array.isArray(project.files) ? [...project.files] : [];
+  const index = files.findIndex((file) => file.path === path);
+  if (content === null || content === undefined) {
+    if (index >= 0) files.splice(index, 1);
+  } else if (index >= 0) {
+    files[index] = { path, content };
+  } else {
+    files.push({ path, content });
+  }
+  project.files = files;
+  const saved = saveProject(project, { id, note });
+  return { ...saved, path };
+}
+
+/**
+ * Przywraca wcześniejszą wersję jako NOWĄ wersję (historia pozostaje nienaruszona).
+ */
+export function restoreVersion(id, versionIndex) {
+  const store = readStore(id);
+  if (!store) return null;
+  const version = store.versions?.[versionIndex];
+  if (!version) return null;
+  const restored = {
+    ...store.project,
+    files: version.files,
+    world: version.world || store.project.world,
+    design: version.design || store.project.design,
+    plan: version.plan || store.project.plan,
+    name: version.name || store.project.name,
+    summary: version.summary ?? store.project.summary,
+  };
+  const saved = saveProject(restored, { id, note: `przywrócono wersję ${versionIndex} (rewizja ${version.revision ?? '?'})` });
+  return { ...saved, restoredFrom: versionIndex };
+}
+
+/**
+ * Różnica między rewizją `since` a obecnym stanem – dla live sync we wtyczce.
+ * Gdy `since` nie istnieje w historii (albo jest starsze niż MAX_VERSIONS),
+ * zwracamy `full: true`, czyli „przebuduj wszystko”.
+ */
+export function diffSince(id, since) {
+  const store = readStore(id);
+  if (!store) return null;
+  const revision = store.revision || 1;
+  const project = store.project;
+  const currentFiles = Array.isArray(project.files) ? project.files : [];
+  const base = Number(since);
+  const history = store.versions || [];
+  const known = Number.isFinite(base) ? history.find((version) => (version.revision ?? -1) === base) : null;
+
+  const decorate = (file, action) => ({
+    ...studioTargetForPath(file.path),
+    path: file.path,
+    action,
+    content: file.content,
+  });
+
+  if (!known) {
+    return {
+      id,
+      revision,
+      since: Number.isFinite(base) ? base : null,
+      full: true,
+      reason: Number.isFinite(base) ? `rewizja ${base} nie jest już w historii` : 'brak rewizji klienta',
+      changed: currentFiles.map((file) => decorate(file, 'replace')),
+      removed: [],
+      unchanged: 0,
+    };
+  }
+
+  const previous = new Map((known.files || []).map((file) => [file.path, String(file.content || '')]));
+  const current = new Map(currentFiles.map((file) => [file.path, String(file.content || '')]));
+  const changed = [];
+  for (const file of currentFiles) {
+    const before = previous.get(file.path);
+    if (before === undefined) changed.push(decorate(file, 'create'));
+    else if (before !== String(file.content || '')) changed.push(decorate(file, 'replace'));
+  }
+  const removed = [];
+  for (const path of previous.keys()) {
+    if (!current.has(path)) {
+      removed.push({ ...studioTargetForPath(path), path, action: 'remove' });
+    }
+  }
+  return {
+    id,
+    revision,
+    since: base,
+    full: false,
+    changed,
+    removed,
+    unchanged: currentFiles.length - changed.length,
+  };
 }
 
 export function listProjects() {
@@ -103,7 +226,14 @@ export function listProjects() {
 
 export function loadProject(id) {
   const store = readStore(id);
-  return store ? { ...store.project, projectId: store.id, versions: store.versions?.length || 0 } : null;
+  if (!store) return null;
+  return {
+    ...store.project,
+    projectId: store.id,
+    revision: store.revision || 1,
+    versions: store.versions?.length || 0,
+    auditScore: store.auditScore ?? null,
+  };
 }
 
 export function loadVersion(id, index) {

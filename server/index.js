@@ -22,8 +22,14 @@ import { getDemo, listDemos } from './games.js';
 import { assembleFiles, buildZipBuffer, exportAs } from './exporters.js';
 import { validateProject } from './validate.js';
 import { startJob, getJob, jobSnapshot, cancelJob, subscribeJob, listJobs, runningJobs } from './jobs.js';
-import { deleteProject, listProjects, loadProject, loadVersion, saveProject, projectsDir } from './projects.js';
+import {
+  deleteProject, diffSince, listProjects, listVersions, loadProject, loadVersion,
+  projectsDir, restoreVersion, saveFile, saveProject,
+} from './projects.js';
 import { renderThumbnail, thumbnailFilename } from './thumbnail.js';
+import { auditProject } from './audit.js';
+import { CATALOG, ASSET_NOTE, assetForTag, searchAssets, starterAssets, tagsUsedInProject } from './assets.js';
+import { PRICING_NOTE, budgetFor, costOf, rateFor } from './pricing.js';
 import { slugify } from './util.js';
 import { buildPlugin } from './plugin.js';
 
@@ -177,6 +183,8 @@ async function handleApi(req, res, url) {
       runningJobs: runningJobs(),
       jobs: listJobs().slice(0, 10),
       libraryPath: projectsDir(),
+      assets: CATALOG.length,
+      budgetUsd: budgetFor({}),
     });
     return true;
   }
@@ -196,7 +204,8 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const demo = getDemo(body.id || 'obby');
     const validation = validateProject(demo);
-    const project = { ...demo, validation, demo: true, usage: { inputTokens: 0, outputTokens: 0, calls: 0 } };
+    const project = { ...demo, validation, demo: true, usage: { inputTokens: 0, outputTokens: 0, calls: 0, usd: 0 } };
+    project.audit = auditProject(project);
     const projectId = body.save === false ? null : persist(project, `demo ${demo.id}`);
     sendJson(res, 200, { project, projectId });
     return true;
@@ -252,7 +261,54 @@ async function handleApi(req, res, url) {
       sendJson(res, 400, { error: 'Brak projektu do walidacji.' });
       return true;
     }
-    sendJson(res, 200, { validation: validateProject(body.project) });
+    sendJson(res, 200, { validation: validateProject(body.project), audit: auditProject(body.project) });
+    return true;
+  }
+
+  if (req.method === 'POST' && route === '/api/audit') {
+    const body = await readBody(req);
+    if (!body.project) {
+      sendJson(res, 400, { error: 'Brak projektu do audytu.' });
+      return true;
+    }
+    sendJson(res, 200, { audit: auditProject(body.project) });
+    return true;
+  }
+
+  /* ---- katalog darmowych assetów i wycena kosztów ---- */
+  if (req.method === 'GET' && route === '/api/assets') {
+    const genre = query.get('genre') || '';
+    const tags = searchAssets({ q: query.get('q') || '', kind: query.get('kind') || '', genre });
+    sendJson(res, 200, {
+      assets: tags,
+      total: tags.length,
+      catalogSize: CATALOG.length,
+      starter: starterAssets(genre),
+      note: ASSET_NOTE,
+    });
+    return true;
+  }
+
+  if (req.method === 'GET' && route === '/api/assets/used') {
+    const projectId = query.get('project');
+    const stored = projectId ? loadProject(projectId) : null;
+    if (!stored) {
+      sendJson(res, 404, { error: 'Nie ma takiego projektu.' });
+      return true;
+    }
+    sendJson(res, 200, { tags: tagsUsedInProject(stored), note: ASSET_NOTE });
+    return true;
+  }
+
+  if (req.method === 'GET' && route === '/api/pricing') {
+    const provider = query.get('provider') || 'openai';
+    const model = query.get('model') || '';
+    sendJson(res, 200, {
+      rate: rateFor(provider, model),
+      example: costOf({ provider, model, inputTokens: 100000, outputTokens: 40000 }),
+      budgetUsd: budgetFor({}),
+      note: PRICING_NOTE,
+    });
     return true;
   }
 
@@ -312,6 +368,7 @@ async function handleApi(req, res, url) {
       snapshot.projectId = projectId;
       snapshot.project.projectId = projectId;
       snapshot.saved = Boolean(projectId);
+      snapshot.revision = snapshot.project.revision || null;
     }
     sendJson(res, 200, snapshot);
     return true;
@@ -330,7 +387,15 @@ async function handleApi(req, res, url) {
 
   /* ---- project library ---- */
   if (req.method === 'GET' && route === '/api/library') {
-    sendJson(res, 200, { projects: listProjects(), libraryPath: projectsDir() });
+    const projects = listProjects().map((entry) => {
+      const stored = loadProject(entry.id);
+      return {
+        ...entry,
+        usd: stored?.cost?.usd ?? stored?.usage?.usd ?? null,
+        auditScore: stored ? auditProject(stored).score : null,
+      };
+    });
+    sendJson(res, 200, { projects, libraryPath: projectsDir() });
     return true;
   }
 
@@ -341,7 +406,7 @@ async function handleApi(req, res, url) {
       sendJson(res, 404, { error: 'Nie ma takiego projektu w bibliotece.' });
       return true;
     }
-    sendJson(res, 200, { project, validation: validateProject(project) });
+    sendJson(res, 200, { project, validation: validateProject(project), audit: auditProject(project) });
     return true;
   }
 
@@ -358,7 +423,7 @@ async function handleApi(req, res, url) {
       sendJson(res, 404, { error: 'Nie ma takiego projektu.' });
       return true;
     }
-    sendJson(res, 200, { project, validation: validateProject(project) });
+    sendJson(res, 200, { project, validation: validateProject(project), audit: auditProject(project) });
     return true;
   }
 
@@ -369,7 +434,62 @@ async function handleApi(req, res, url) {
       sendJson(res, 404, { error: 'Nie ma takiej wersji.' });
       return true;
     }
-    sendJson(res, 200, { project, validation: validateProject(project) });
+    sendJson(res, 200, { project, validation: validateProject(project), audit: auditProject(project) });
+    return true;
+  }
+
+  /* ---- live sync: diff dla wtyczki i edycja plików ---- */
+  const diffMatch = route.match(/^\/api\/projects\/([\w.-]+)\/diff$/);
+  if (req.method === 'GET' && diffMatch) {
+    const diff = diffSince(diffMatch[1], query.get('since'));
+    if (!diff) {
+      sendJson(res, 404, { error: 'Nie ma takiego projektu.' });
+      return true;
+    }
+    sendJson(res, 200, diff);
+    return true;
+  }
+
+  const versionsMatch = route.match(/^\/api\/library\/([\w.-]+)\/versions$/);
+  if (req.method === 'GET' && versionsMatch) {
+    const versions = listVersions(versionsMatch[1]);
+    if (!versions.length && !loadProject(versionsMatch[1])) {
+      sendJson(res, 404, { error: 'Nie ma takiego projektu.' });
+      return true;
+    }
+    const project = loadProject(versionsMatch[1]);
+    sendJson(res, 200, { id: versionsMatch[1], revision: project?.revision || 1, versions });
+    return true;
+  }
+
+  const restoreMatch = route.match(/^\/api\/library\/([\w.-]+)\/restore$/);
+  if (req.method === 'POST' && restoreMatch) {
+    const body = await readBody(req);
+    const saved = restoreVersion(restoreMatch[1], Number(body.index ?? 0));
+    if (!saved) {
+      sendJson(res, 404, { error: 'Nie ma takiej wersji.' });
+      return true;
+    }
+    const project = loadProject(restoreMatch[1]);
+    sendJson(res, 200, { project, validation: validateProject(project), audit: auditProject(project), ...saved });
+    return true;
+  }
+
+  const fileMatch = route.match(/^\/api\/library\/([\w.-]+)\/file$/);
+  if (req.method === 'POST' && fileMatch) {
+    const body = await readBody(req);
+    if (!body.path || typeof body.content !== 'string') {
+      sendJson(res, 400, { error: 'Wymagane: path i content.' });
+      return true;
+    }
+    // Edytować można tylko pliki projektu (żadnych ścieżek spoza src/).
+    const saved = saveFile(fileMatch[1], String(body.path), body.content, { note: body.note || 'edycja w edytorze' });
+    if (!saved) {
+      sendJson(res, 404, { error: 'Nie ma takiego projektu.' });
+      return true;
+    }
+    const project = loadProject(fileMatch[1]);
+    sendJson(res, 200, { ...saved, project, audit: auditProject(project) });
     return true;
   }
 
@@ -391,6 +511,7 @@ async function handleApi(req, res, url) {
         model: body.model || project.meta?.model,
         language: body.language || project.meta?.language,
         projectId: project.projectId || null,
+        revision: project.revision ?? null,
       }), 'utf8'), warnings: [] };
       const filename = `${slugify(project.name || 'ai-game', 'ai-game')}.plugin.luau`;
       sendBuffer(res, 200, buffer, 'text/plain; charset=utf-8', {
@@ -487,6 +608,7 @@ export function createServer() {
       const source = buildPlugin(project, {
         serverUrl: `http://127.0.0.1:${serverPort}`,
         projectId,
+        revision: project.revision ?? null,
         provider: project.meta?.provider,
         model: project.meta?.model,
         language: project.meta?.language || 'pl',

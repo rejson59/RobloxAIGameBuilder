@@ -26,6 +26,7 @@ local PROJECT = {
 	summary = "Proceduralny tor parkour nad przepaścią z lawą. Każda platforma jest inna, część jeździ w bok, a każdy szósty etap to checkpoint, do którego wracasz po śmierci. Zbierasz monety i ścigasz się z czasem.",
 	genre = "Obby",
 	projectId = nil,
+	revision = nil,
 	notes = {
 		"Tor buduje się proceduralnie z seeda Config.Seed – zmiana liczby = nowy level, bez rysowania w Studio.",
 		"Checkpointy to SpawnLocation-y ustawiane jako player.RespawnLocation, więc respawn działa \"z pudelka\" i jest po stronie serwera.",
@@ -1041,6 +1042,289 @@ end
 
 
 --==================================================================
+--  ŚCIEŻKI W STUDIO: plik z projektu -> instancja w miejscu
+--  (te same reguły co przy budowaniu, więc live sync trafia w ten sam skrypt)
+--==================================================================
+local function studioContainer(target)
+	local ok, service = pcall(game.GetService, game, target.service)
+	if not ok or not service then
+		return nil
+	end
+	local container = service
+	if target.service == "StarterPlayer" then
+		container = service:FindFirstChild("StarterPlayerScripts") or service
+	end
+	for _, folderName in ipairs(target.folders or {}) do
+		local nextFolder = container:FindFirstChild(folderName)
+		if not (nextFolder and nextFolder:IsA("Folder")) then
+			return nil
+		end
+		container = nextFolder
+	end
+	return container
+end
+
+local function findScriptForTarget(target)
+	local container = studioContainer(target)
+	if not container then
+		return nil
+	end
+	local existing = container:FindFirstChild(target.name)
+	if existing and existing:IsA("LuaSourceContainer") then
+		return existing
+	end
+	return nil
+end
+
+local function ensureScriptForTarget(target)
+	local existing = findScriptForTarget(target)
+	if existing then
+		return existing, false
+	end
+	local ok, service = pcall(game.GetService, game, target.service)
+	if not ok or not service then
+		return nil, false
+	end
+	local container = service
+	if target.service == "StarterPlayer" then
+		container = service:FindFirstChild("StarterPlayerScripts") or service
+	end
+	for _, folderName in ipairs(target.folders or {}) do
+		local nextFolder = container:FindFirstChild(folderName)
+		if not (nextFolder and nextFolder:IsA("Folder")) then
+			nextFolder = Instance.new("Folder")
+			nextFolder.Name = folderName
+			nextFolder.Parent = container
+		end
+		container = nextFolder
+	end
+	local created = Instance.new(target.className or "ModuleScript")
+	created.Name = target.name
+	created.Parent = container
+	return created, true
+end
+
+--==================================================================
+--  LIVE SYNC: dociąganie tylko zmienionych skryptów z buildera
+--==================================================================
+local liveState = { revision = tonumber(PROJECT.revision) or 0, enabled = false, lastMessage = "" }
+
+local function fetchDiff(since)
+	if not PROJECT.projectId then
+		return nil, "Ta wtyczka nie zna id projektu – wyeksportuj ją ponownie z aplikacji webowej."
+	end
+	return request("GET", "/api/projects/" .. PROJECT.projectId .. "/diff?since=" .. tostring(since or 0), nil)
+end
+
+--- Wstawia różnicę do miejsca. Zwraca (zaktualizowane, utworzone, usunięte).
+local function applyDiff(diff)
+	local updated, created, removed = 0, 0, 0
+	local recording = ChangeHistoryService:TryBeginRecording("AI Builder: live sync")
+	for _, change in ipairs(diff.changed or {}) do
+		local target = {
+			service = change.service,
+			folders = change.folders,
+			name = change.name,
+			className = change.className,
+		}
+		local script_, wasCreated = ensureScriptForTarget(target)
+		if script_ then
+			local ok = pcall(function()
+				script_.Source = change.content or ""
+			end)
+			if ok then
+				updated = updated + 1
+				if wasCreated then
+					created = created + 1
+				end
+			end
+		end
+	end
+	for _, change in ipairs(diff.removed or {}) do
+		local script_ = findScriptForTarget({ service = change.service, folders = change.folders, name = change.name })
+		if script_ then
+			script_:Destroy()
+			removed = removed + 1
+		end
+	end
+	if recording then
+		ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+	end
+	return updated, created, removed
+end
+
+--- Pełna synchronizacja projektu z serwera (świat + skrypty).
+local function adoptProject(project)
+	PROJECT.name = project.name or PROJECT.name
+	PROJECT.summary = project.summary or PROJECT.summary
+	PROJECT.genre = project.genre or PROJECT.genre
+	PROJECT.design = project.design or PROJECT.design
+	PROJECT.plan = project.plan or PROJECT.plan
+	PROJECT.world = project.world and project.world.world or PROJECT.world
+	PROJECT.lighting = project.world and project.world.lighting or PROJECT.lighting
+	PROJECT.files = {}
+	for _, file in ipairs(project.files or {}) do
+		table.insert(PROJECT.files, { path = file.path, content = file.content })
+	end
+	PROJECT.projectId = project.projectId or PROJECT.projectId
+	PROJECT.revision = project.revision or PROJECT.revision
+	liveState.revision = tonumber(project.revision) or liveState.revision
+end
+
+local function rebuildFromProject(project, counters)
+	adoptProject(project)
+	local root = buildProject({ world = PROJECT.world, lighting = PROJECT.lighting, files = PROJECT.files }, counters or { nodes = 0, scripts = 0, skipped = 0 })
+	return root
+end
+
+--==================================================================
+--  BŁĘDY RUNTIME: LogService łapie wszystko, co dzieje się podczas Play
+--==================================================================
+local LogService = game:GetService("LogService")
+local runtimeErrors = {}
+local runtimeErrorCount = 0
+
+LogService.MessageOut:Connect(function(message, messageType)
+	if messageType ~= Enum.MessageType.MessageError then
+		return
+	end
+	local text = tostring(message)
+	if string.find(text, "%[AI Builder%]") then
+		return -- nasze własne komunikaty, nie błąd gry
+	end
+	table.insert(runtimeErrors, text)
+	runtimeErrorCount = runtimeErrorCount + 1
+	if #runtimeErrors > 80 then
+		table.remove(runtimeErrors, 1)
+	end
+end)
+
+local function runtimeErrorsText(limit)
+	limit = limit or 25
+	local unique, seen = {}, {}
+	for index = #runtimeErrors, 1, -1 do
+		local text = runtimeErrors[index]
+		local key = string.sub(text, 1, 140)
+		if not seen[key] then
+			seen[key] = true
+			table.insert(unique, text)
+			if #unique >= limit then
+				break
+			end
+		end
+	end
+	return table.concat(unique, "\n")
+end
+
+local function clearRuntimeErrors()
+	runtimeErrors = {}
+end
+
+--==================================================================
+--  ZNACZNIKI ASSETÓW: placeholder:tag -> darmowy asset z katalogu
+--==================================================================
+local function placeholderTag(value)
+	if type(value) ~= "string" then
+		return nil
+	end
+	local start = string.find(value, "placeholder:", 1, true)
+	if not start then
+		return nil
+	end
+	local tag = string.sub(value, start + #"placeholder:")
+	tag = string.gsub(tag, "%s", "")
+	if tag == "" then
+		return nil
+	end
+	return string.lower(tag)
+end
+
+--- Znajduje właściwości assetów ustawione na placeholder:<tag>.
+local function findPlaceholderTags(limit)
+	limit = limit or 200
+	local found = {}
+	for _, serviceName in ipairs({ "Workspace", "ReplicatedStorage", "StarterGui", "StarterPlayer", "ServerStorage", "SoundService" }) do
+		local service = game:GetService(serviceName)
+		local ok, descendants = pcall(function()
+			return service:GetDescendants()
+		end)
+		if ok then
+			for _, instance in ipairs(descendants) do
+				for _, field in ipairs(ASSET_FIELDS) do
+					if instance:IsA(field.className) then
+						local okValue, value = pcall(function()
+							return instance[field.property]
+						end)
+						local tag = okValue and placeholderTag(value) or nil
+						if tag then
+							table.insert(found, {
+								instance = instance,
+								property = field.property,
+								tag = tag,
+								path = instance:GetFullName(),
+							})
+							if #found >= limit then
+								return found
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	return found
+end
+
+--- Zamienia znaczniki na prawdziwe assety z katalogu serwera (jeden klik).
+local function fillPlaceholderTags(onProgress)
+	local found = findPlaceholderTags(200)
+	if #found == 0 then
+		return 0, 0, "Brak znaczników placeholder:… w tym miejscu."
+	end
+	local catalogResponse = request("GET", "/api/assets", nil)
+	if not catalogResponse then
+		return 0, #found, "Brak połączenia z builderem – nie mogę pobrać katalogu assetów."
+	end
+	local byTag = {}
+	for _, asset in ipairs(catalogResponse.assets or {}) do
+		if asset.placeholder then
+			byTag[string.lower(asset.placeholder)] = asset
+		end
+		for _, tag in ipairs(asset.tags or {}) do
+			local key = "placeholder:" .. string.lower(tag)
+			if not byTag[key] then
+				byTag[key] = asset
+			end
+		end
+	end
+
+	local recording = ChangeHistoryService:TryBeginRecording("AI Builder: znaczniki assetów")
+	local filled, skipped = 0, 0
+	for index, item in ipairs(found) do
+		if onProgress then
+			onProgress(index / #found, string.format("Podmieniam %d/%d: %s", index, #found, item.tag))
+		end
+		local asset = byTag["placeholder:" .. item.tag]
+		if asset then
+			local ok = pcall(function()
+				item.instance[item.property] = asset.rbxAssetId
+			end)
+			if ok then
+				filled = filled + 1
+			else
+				skipped = skipped + 1
+			end
+		else
+			skipped = skipped + 1
+		end
+	end
+	if recording then
+		ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+	end
+	return filled, skipped, nil
+end
+
+--==================================================================
 --  INTERFEJS: pasek narzędzi + dock widget z generatorem
 --==================================================================
 local toolbar = plugin:CreateToolbar("Roblox AI Game Builder")
@@ -1117,7 +1401,7 @@ scroll.Size = UDim2.fromScale(1, 1)
 scroll.BackgroundColor3 = theme.bg
 scroll.BorderSizePixel = 0
 scroll.ScrollBarThickness = 6
-scroll.CanvasSize = UDim2.new(0, 0, 0, 1010)
+scroll.CanvasSize = UDim2.new(0, 0, 0, 1350)
 scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 scroll.Parent = widget
 
@@ -1130,18 +1414,38 @@ pad.Parent = scroll
 -- Nagłówek --------------------------------------------------------
 local header = makeFrame(pad, UDim2.new(1, 0, 0, 72), UDim2.fromOffset(0, 0), theme.panel)
 makeLabel(header, PROJECT.name, UDim2.new(1, -20, 0, 22), UDim2.fromOffset(12, 8), theme.accent, true)
-makeLabel(header, (PROJECT.tagline or PROJECT.summary or ""), UDim2.new(1, -20, 0, 34), UDim2.fromOffset(12, 32), theme.muted)
+makeLabel(header, (PROJECT.tagline or PROJECT.summary or ""), UDim2.new(1, -20, 0, 22), UDim2.fromOffset(12, 32), theme.muted)
+makeLabel(header, "projekt: " .. tostring(PROJECT.projectId or "(bez id)") .. " · rewizja " .. tostring(PROJECT.revision or "?"),
+	UDim2.new(1, -20, 0, 14), UDim2.fromOffset(12, 54), theme.muted)
 
 -- Sekcja 1: budowanie ---------------------------------------------
-local sectionBuild = makeFrame(pad, UDim2.new(1, 0, 0, 116), UDim2.fromOffset(0, 80), theme.panel)
+local sectionBuild = makeFrame(pad, UDim2.new(1, 0, 0, 152), UDim2.fromOffset(0, 80), theme.panel)
 makeLabel(sectionBuild, "1. ZBUDUJ / PRZEBUDUJ GRĘ", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
 local buildBtn = makeButton(sectionBuild, "Buduj grę w tym miejscu", UDim2.new(1, -24, 0, 34), UDim2.fromOffset(12, 28), true)
 local selectBtn = makeButton(sectionBuild, "Zaznacz folder gry", UDim2.new(0.5, -16, 0, 28), UDim2.fromOffset(12, 68), false)
 local undoBtn = makeButton(sectionBuild, "Cofnij budowanie (Ctrl+Z)", UDim2.new(0.5, -16, 0, 28), UDim2.fromOffset(24 + 158, 68), false)
 local buildStatus = makeLabel(sectionBuild, "Skrypty: " .. tostring(#(PROJECT.files or {})) .. " · mapa: gotowa do zbudowania", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 98), theme.muted)
 
+-- Live sync: wtyczka pilnuje rewizji projektu i dociąga TYLKO zmienione skrypty.
+local syncCheck = Instance.new("TextButton")
+syncCheck.Size = UDim2.new(0, 18, 0, 18)
+syncCheck.Position = UDim2.fromOffset(12, 124)
+syncCheck.BackgroundColor3 = Color3.fromRGB(12, 15, 28)
+syncCheck.BorderSizePixel = 0
+syncCheck.Text = ""
+syncCheck.AutoButtonColor = false
+syncCheck.Parent = sectionBuild
+corner(syncCheck, 5)
+local syncDot = Instance.new("Frame")
+syncDot.Size = UDim2.fromScale(1, 1)
+syncDot.BackgroundColor3 = theme.muted
+syncDot.BorderSizePixel = 0
+syncDot.Parent = syncCheck
+corner(syncDot, 5)
+makeLabel(sectionBuild, "Live sync: dociągaj zmiany z aplikacji (bez przebudowy całej gry)", UDim2.new(1, -50, 0, 18), UDim2.fromOffset(36, 124), theme.muted)
+
 -- Sekcja 2: zmiany przez AI ---------------------------------------
-local sectionRefine = makeFrame(pad, UDim2.new(1, 0, 0, 246), UDim2.fromOffset(0, 204), theme.panel)
+local sectionRefine = makeFrame(pad, UDim2.new(1, 0, 0, 246), UDim2.fromOffset(0, 240), theme.panel)
 makeLabel(sectionRefine, "2. POPROŚ O ZMIANĘ (AI)", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
 local refineBox = Instance.new("TextBox")
 refineBox.Size = UDim2.new(1, -24, 0, 62)
@@ -1179,7 +1483,7 @@ local refineFullBtn = makeButton(sectionRefine, "Tylko kod", UDim2.new(0.38, -18
 local refineStatus = makeLabel(sectionRefine, "Zmiana wymaga działającego lokalnego buildera (npm start).", UDim2.new(1, -20, 0, 60), UDim2.fromOffset(12, 172), theme.muted)
 
 -- Sekcja 3: postęp ------------------------------------------------
-local sectionProgress = makeFrame(pad, UDim2.new(1, 0, 0, 74), UDim2.fromOffset(0, 458), theme.panel)
+local sectionProgress = makeFrame(pad, UDim2.new(1, 0, 0, 132), UDim2.fromOffset(0, 494), theme.panel)
 local progressBar = makeFrame(sectionProgress, UDim2.new(1, -24, 0, 10), UDim2.fromOffset(12, 14), Color3.fromRGB(12, 15, 28))
 local progressFill = Instance.new("Frame")
 progressFill.Size = UDim2.fromScale(0, 1)
@@ -1190,9 +1494,13 @@ corner(progressFill, 5)
 local progressLabel = makeLabel(sectionProgress, "Gotowe do pracy.", UDim2.new(1, -120, 0, 40), UDim2.fromOffset(12, 30), theme.muted)
 local cancelBtn = makeButton(sectionProgress, "Przerwij", UDim2.new(0, 96, 0, 26), UDim2.new(1, -108, 0, 32), false)
 cancelBtn.Visible = false
+-- Błędy z Play (LogService) – po teście gry można je wysłać do modelu i naprawić.
+local errorsLabel = makeLabel(sectionProgress, "Błędy z Play: 0", UDim2.new(1, -24, 0, 16), UDim2.fromOffset(12, 76), theme.muted)
+local fixErrorsBtn = makeButton(sectionProgress, "Napraw błędy z Play (AI)", UDim2.new(0.55, -18, 0, 28), UDim2.fromOffset(12, 96), false)
+local clearErrorsBtn = makeButton(sectionProgress, "Wyczyść listę", UDim2.new(0.45, -18, 0, 28), UDim2.fromOffset(196, 96), false)
 
 -- Sekcja 4: assety i zaślepki -------------------------------------
-local sectionAssets = makeFrame(pad, UDim2.new(1, 0, 0, 250), UDim2.fromOffset(0, 540), theme.panel)
+local sectionAssets = makeFrame(pad, UDim2.new(1, 0, 0, 296), UDim2.fromOffset(0, 634), theme.panel)
 makeLabel(sectionAssets, "3. ZAŚLEPKI ASSETÓW", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
 local scanBtn = makeButton(sectionAssets, "Znajdź brakujące assety", UDim2.new(1, -24, 0, 30), UDim2.fromOffset(12, 28), false)
 local assetList = Instance.new("ScrollingFrame")
@@ -1209,10 +1517,12 @@ local assetListLayout = Instance.new("UIListLayout")
 assetListLayout.Padding = UDim.new(0, 4)
 assetListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 assetListLayout.Parent = assetList
-local assetHint = makeLabel(sectionAssets, "Kliknij, aby znaleźć Decal/Sound/Mesh bez wartości (zaślepki po AI i importach).", UDim2.new(1, -20, 0, 30), UDim2.fromOffset(12, 166), theme.muted)
+local assetHint = makeLabel(sectionAssets, "Kliknij, aby znaleźć Decal/Sound/Mesh bez wartości (zaślepki po AI i importach).", UDim2.new(1, -20, 0, 34), UDim2.fromOffset(12, 166), theme.muted)
+local fillTagsBtn = makeButton(sectionAssets, "Podmień znaczniki placeholder:… na darmowe assety", UDim2.new(1, -24, 0, 30), UDim2.fromOffset(12, 206), true)
+local fillTagsStatus = makeLabel(sectionAssets, "Kod AI może zawierać znaczniki, np. SoundId = \"placeholder:coin\".", UDim2.new(1, -20, 0, 46), UDim2.fromOffset(12, 240), theme.muted)
 
 -- Sekcja 5: darmowe assety + ikona ---------------------------------
-local sectionFree = makeFrame(pad, UDim2.new(1, 0, 0, 196), UDim2.fromOffset(0, 800), theme.panel)
+local sectionFree = makeFrame(pad, UDim2.new(1, 0, 0, 196), UDim2.fromOffset(0, 940), theme.panel)
 makeLabel(sectionFree, "4. DARMOWE ASSETY I IKONA", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
 local freeButtons = {}
 for index, asset in ipairs(FREE_ASSETS) do
@@ -1229,6 +1539,26 @@ for index, asset in ipairs(FREE_ASSETS) do
 end
 local iconBtn = makeButton(sectionFree, "Zapisz ikonę gry (PNG 512x512)", UDim2.new(1, -24, 0, 30), UDim2.fromOffset(12, 136), true)
 local iconHint = makeLabel(sectionFree, "Ikona trafi do folderu wtyczek – wgraj ją na create.roblox.com.", UDim2.new(1, -20, 0, 28), UDim2.fromOffset(12, 170), theme.muted)
+
+-- Sekcja 6: historia wersji i rollback ---------------------------
+local sectionHistory = makeFrame(pad, UDim2.new(1, 0, 0, 200), UDim2.fromOffset(0, 1146), theme.panel)
+makeLabel(sectionHistory, "5. HISTORIA WERSJI (COFNIJ ZMIANĘ)", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
+local versionsBtn = makeButton(sectionHistory, "Pokaż wersje projektu", UDim2.new(1, -24, 0, 28), UDim2.fromOffset(12, 28), false)
+local versionList = Instance.new("ScrollingFrame")
+versionList.Size = UDim2.new(1, -24, 0, 104)
+versionList.Position = UDim2.fromOffset(12, 62)
+versionList.BackgroundColor3 = Color3.fromRGB(12, 15, 28)
+versionList.BorderSizePixel = 0
+versionList.ScrollBarThickness = 4
+versionList.CanvasSize = UDim2.new(0, 0, 0, 0)
+versionList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+versionList.Parent = sectionHistory
+corner(versionList, 7)
+local versionLayout = Instance.new("UIListLayout")
+versionLayout.Padding = UDim.new(0, 4)
+versionLayout.SortOrder = Enum.SortOrder.LayoutOrder
+versionLayout.Parent = versionList
+local historyStatus = makeLabel(sectionHistory, "Rollback tworzy nową wersję – nic nie ginie z historii.", UDim2.new(1, -20, 0, 28), UDim2.fromOffset(12, 170), theme.muted)
 
 --==================================================================
 --  Logika interfejsu
@@ -1280,6 +1610,7 @@ local function doBuild()
 	end
 	local message = string.format("Zbudowano: %d instancji, %d skryptów%s.", counters.nodes, counters.scripts,
 		counters.skipped > 0 and (", pominięto " .. counters.skipped) or "")
+	liveState.revision = tonumber(PROJECT.revision) or liveState.revision
 	buildStatus.Text = message
 	stopBusy(message, theme.accent)
 	log(message)
@@ -1300,6 +1631,9 @@ local function doRefine()
 	task.spawn(function()
 		-- Zawsze serializujemy aktualny stan: kod z miejsca (jeśli zbudowane) + mapa projektu.
 		local payload = projectPayloadForRefine()
+		-- Rewizja z serwera trafia do stanu live sync, żeby nie dociągać tej samej zmiany dwa razy.
+		liveState.revision = tonumber(project.revision) or liveState.revision
+
 		local key = keyBox.Text
 		if type(key) == "string" then
 			key = string.gsub(key, "%s", "")
@@ -1388,6 +1722,194 @@ local function doScan()
 		end)
 	end
 end
+
+-- Live sync ------------------------------------------------------
+syncCheck.MouseButton1Click:Connect(function()
+	liveState.enabled = not liveState.enabled
+	syncDot.BackgroundColor3 = liveState.enabled and theme.accent or theme.muted
+	if liveState.enabled then
+		local diff, err = fetchDiff(liveState.revision)
+		if not diff then
+			liveState.enabled = false
+			syncDot.BackgroundColor3 = theme.muted
+			stopBusy("Live sync wyłączony: " .. tostring(err), theme.warn)
+			return
+		end
+		if diff.full then
+			stopBusy("Live sync włączony – pierwsza synchronizacja całego projektu...", theme.muted)
+			local counters = { nodes = 0, scripts = 0, skipped = 0 }
+			buildProject({ world = PROJECT.world, lighting = PROJECT.lighting, files = PROJECT.files }, counters)
+			liveState.revision = diff.revision
+			stopBusy("Zsynchronizowano (rewizja " .. tostring(diff.revision) .. ").", theme.accent)
+		else
+			stopBusy("Live sync włączony. Pilnuję rewizji " .. tostring(liveState.revision) .. ".", theme.accent)
+		end
+	else
+		stopBusy("Live sync wyłączony.", theme.muted)
+	end
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(2.5)
+		if liveState.enabled and not busy and PROJECT.projectId then
+			local diff, err = fetchDiff(liveState.revision)
+			if not diff then
+				liveState.lastMessage = tostring(err)
+			elseif diff.revision ~= liveState.revision then
+				if diff.full then
+					local counters = { nodes = 0, scripts = 0, skipped = 0 }
+					buildProject({ world = PROJECT.world, lighting = PROJECT.lighting, files = PROJECT.files }, counters)
+					liveState.revision = diff.revision
+					buildStatus.Text = "Live sync: pełna przebudowa (rewizja " .. tostring(diff.revision) .. ")."
+				else
+					local updated, created, removed = applyDiff(diff)
+					liveState.revision = diff.revision
+					-- Kod zmieniony w Studiu jest ważniejszy: aktualizujemy tylko wpisy z serwera.
+					for _, change in ipairs(diff.changed or {}) do
+						local found = false
+						for index, file in ipairs(PROJECT.files) do
+							if file.path == change.path then
+								PROJECT.files[index] = { path = change.path, content = change.content }
+								found = true
+							end
+						end
+						if not found then
+							table.insert(PROJECT.files, { path = change.path, content = change.content })
+						end
+					end
+					for _, change in ipairs(diff.removed or {}) do
+						for index = #PROJECT.files, 1, -1 do
+							if PROJECT.files[index].path == change.path then
+								table.remove(PROJECT.files, index)
+							end
+						end
+					end
+					buildStatus.Text = string.format("Live sync: %d skrypt(ów) zaktualizowanych, %d nowych, %d usuniętych (rewizja %d).",
+						updated, created, removed, diff.revision)
+				end
+			end
+		end
+	end
+end)
+
+-- Błędy runtime ---------------------------------------------------
+task.spawn(function()
+	local lastCount = -1
+	while true do
+		task.wait(1)
+		if runtimeErrorCount ~= lastCount then
+			lastCount = runtimeErrorCount
+			errorsLabel.Text = string.format("Błędy z Play: %d%s", runtimeErrorCount,
+				runtimeErrorCount > 0 and "  (kliknij „Napraw błędy z Play”)" or "")
+			errorsLabel.TextColor3 = runtimeErrorCount > 0 and theme.warn or theme.muted
+		end
+	end
+end)
+
+clearErrorsBtn.MouseButton1Click:Connect(function()
+	clearRuntimeErrors()
+	runtimeErrorCount = 0
+	errorsLabel.Text = "Błędy z Play: 0"
+	errorsLabel.TextColor3 = theme.muted
+end)
+
+fixErrorsBtn.MouseButton1Click:Connect(function()
+	if busy then
+		return
+	end
+	if runtimeErrorCount == 0 then
+		stopBusy("Najpierw przetestuj grę (Play) – wtedy zbiorę błędy.", theme.warn)
+		return
+	end
+	if not PROJECT.projectId then
+		stopBusy("Ta wtyczka nie zna id projektu – wyeksportuj ją z aplikacji webowej.", theme.warn)
+		return
+	end
+	local errors = runtimeErrorsText(25)
+	local instruction = "Gra wyrzuciła poniższe błędy podczas testu w Roblox Studio. Napraw przyczyny (nie komentuj kodu, napraw logikę):\n\n" .. errors
+	refineBox.Text = instruction
+	doRefine()
+	clearRuntimeErrors()
+	runtimeErrorCount = 0
+end)
+
+-- Znaczniki assetów ----------------------------------------------
+fillTagsBtn.MouseButton1Click:Connect(function()
+	if busy then
+		return
+	end
+	startBusy("Szukam znaczników placeholder:…")
+	task.spawn(function()
+		local filled, skipped, err = fillPlaceholderTags(function(ratio, message)
+			setProgress(ratio, message)
+		end)
+		if err then
+			stopBusy(err, theme.warn)
+			fillTagsStatus.Text = err
+			return
+		end
+		local message = string.format("Podmieniono %d znacznik(ów)%s.", filled, skipped > 0 and (", pominięto " .. skipped) or "")
+		fillTagsStatus.Text = message .. " Assety pochodzą z katalogu lokalnego buildera."
+		stopBusy(message, filled > 0 and theme.accent or theme.warn)
+	end)
+end)
+
+-- Historia wersji -------------------------------------------------
+local function refreshVersions()
+	if not PROJECT.projectId then
+		stopBusy("Brak id projektu – wersje są w aplikacji webowej.", theme.warn)
+		return
+	end
+	for _, child in ipairs(versionList:GetChildren()) do
+		if child:IsA("TextButton") then
+			child:Destroy()
+		end
+	end
+	local response, err = request("GET", "/api/library/" .. PROJECT.projectId .. "/versions", nil)
+	if not response then
+		historyStatus.Text = tostring(err)
+		return
+	end
+	historyStatus.Text = string.format("Aktualna rewizja: %s · wersji w historii: %d", tostring(response.revision), #(response.versions or {}))
+	for index, version in ipairs(response.versions or {}) do
+		local row = Instance.new("TextButton")
+		row.Size = UDim2.new(1, -8, 0, 28)
+		row.BackgroundColor3 = Color3.fromRGB(26, 31, 54)
+		row.BorderSizePixel = 0
+		row.Font = Enum.Font.Code
+		row.TextSize = 11
+		row.TextColor3 = theme.text
+		row.TextXAlignment = Enum.TextXAlignment.Left
+		row.Text = string.format("  rewizja %s · %s · %s", tostring(version.revision), tostring(version.note), tostring(version.at))
+		row.LayoutOrder = index
+		row.Parent = versionList
+		corner(row, 6)
+		row.MouseButton1Click:Connect(function()
+			if busy then
+				return
+			end
+			startBusy("Przywracam wersję...")
+			task.spawn(function()
+				local restored, restoreErr = request("POST", "/api/library/" .. PROJECT.projectId .. "/restore", { index = version.index })
+				if not restored then
+					stopBusy("Nie udało się: " .. tostring(restoreErr), theme.err)
+					return
+				end
+				local counters = { nodes = 0, scripts = 0, skipped = 0 }
+				pcall(function()
+					rebuildFromProject(restored.project, counters)
+				end)
+				buildStatus.Text = string.format("Przywrócono wersję %s (rewizja %s): %d instancji, %d skryptów.",
+					tostring(version.index), tostring(restored.revision), counters.nodes, counters.scripts)
+				stopBusy("Przywrócono i przebudowano miejsce.", theme.accent)
+				refreshVersions()
+			end)
+		end)
+	end
+end
+
+versionsBtn.MouseButton1Click:Connect(refreshVersions)
 
 -- Zdarzenia -------------------------------------------------------
 buildBtn.MouseButton1Click:Connect(doBuild)

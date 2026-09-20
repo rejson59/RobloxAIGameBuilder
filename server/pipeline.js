@@ -5,7 +5,9 @@
  * large projects do not hit the output-token ceiling of a single response:
  *   shared interfaces -> server modules -> bootstrap wiring -> client.
  */
-import { chat, ProviderError } from './providers.js';
+import { chat, chatStream, ProviderError } from './providers.js';
+import { CostTracker, budgetFor, formatUsd } from './pricing.js';
+import { auditProject } from './audit.js';
 import {
   DESIGN_SYSTEM, PLAN_SYSTEM, REFINE_SYSTEM, REPAIR_SYSTEM, SCRIPTS_SYSTEM, WORLD_SYSTEM,
   designPrompt, planPrompt, refinePrompt, repairFilesPrompt, repairPrompt, scriptsPrompt, worldPrompt,
@@ -36,21 +38,69 @@ async function callJson({ config, system, user, maxTokens, temperature = 0.6, on
   const messages = [{ role: 'user', content: user }];
   let usage = { inputTokens: 0, outputTokens: 0 };
   let text = '';
+  const wantStream = config.stream !== false && config.provider !== 'demo';
 
   for (let attempt = 0; attempt < 2; attempt++) {
     onEvent?.({ type: 'stage', stage, message: attempt === 0 ? label : `${label} (poprawianie formatu JSON)` });
-    const res = await chat({
-      provider: config.provider,
-      apiKey: config.apiKey,
-      baseUrl: config.baseUrl,
-      model: config.model,
-      system,
-      messages,
-      maxTokens,
-      temperature,
-      jsonMode: true,
-      signal,
-    });
+
+    // Podgląd na żywo: strumień modelu trafia do UI jako zdarzenia "delta".
+    let lastDeltaAt = 0;
+    const onDelta = wantStream
+      ? (_piece, full) => {
+        const now = Date.now();
+        if (now - lastDeltaAt < 450 && full.length < 200000) return;
+        lastDeltaAt = now;
+        onEvent?.({ type: 'delta', stage, chars: full.length, tail: full.slice(-320), streaming: true });
+      }
+      : undefined;
+
+    let res;
+    try {
+      res = wantStream
+        ? await chatStream({
+          provider: config.provider,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
+          model: config.model,
+          system,
+          messages,
+          maxTokens,
+          temperature,
+          signal,
+          onDelta,
+        })
+        : await chat({
+          provider: config.provider,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
+          model: config.model,
+          system,
+          messages,
+          maxTokens,
+          temperature,
+          jsonMode: true,
+          signal,
+        });
+    } catch (err) {
+      // Strumień bywa blokowany przez bramki – wtedy wracamy do zwykłego zapytania.
+      if (wantStream && err instanceof ProviderError && err.status && err.status >= 400 && err.status < 500) {
+        onEvent?.({ type: 'warn', message: 'Strumieniowanie niedostępne u tego dostawcy – przechodzę na zwykłe zapytanie.' });
+        res = await chat({
+          provider: config.provider,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
+          model: config.model,
+          system,
+          messages,
+          maxTokens,
+          temperature,
+          jsonMode: true,
+          signal,
+        });
+      } else {
+        throw err;
+      }
+    }
     text = res.text;
     usage.inputTokens += res.usage?.inputTokens || 0;
     usage.outputTokens += res.usage?.outputTokens || 0;
@@ -111,11 +161,17 @@ export async function generateGame({ idea, options = {}, config, onEvent, signal
   const started = Date.now();
   const scale = SCALE_PRESETS[options.scale] ? options.scale : 'standard';
   const preset = SCALE_PRESETS[scale];
-  const usage = { inputTokens: 0, outputTokens: 0, calls: 0 };
+  const budget = budgetFor(options);
+  const tracker = new CostTracker({ provider: config?.provider, model: config?.model, budget });
+  const usage = { inputTokens: 0, outputTokens: 0, calls: 0, usd: 0 };
   const addUsage = (u) => {
     usage.inputTokens += u?.inputTokens || 0;
     usage.outputTokens += u?.outputTokens || 0;
     usage.calls++;
+    // Koszt liczymy po każdej odpowiedzi modelu – dzięki temu budżet działa w trakcie.
+    const { total } = tracker.add(u || {});
+    usage.usd = Number(total.toFixed(6));
+    usage.rate = tracker.rate;
   };
   const emit = (event) => onEvent?.({ ...event, elapsedMs: Date.now() - started });
 
@@ -123,8 +179,10 @@ export async function generateGame({ idea, options = {}, config, onEvent, signal
     emit({ type: 'stage', stage: 'demo', message: 'Tryb offline: buduję gotowy projekt demo (bez użycia klucza API).' });
     const demo = getDemo(options.demoId || idea || 'obby');
     const validation = validateProject(demo);
-    emit({ type: 'done', message: 'Projekt demo gotowy.', stats: validation.stats });
-    return { ...demo, validation, usage, demo: true };
+    const demoProject = { ...demo, validation, usage, demo: true };
+    demoProject.audit = auditProject(demoProject);
+    emit({ type: 'done', message: 'Projekt demo gotowy.', stats: validation.stats, auditScore: demoProject.audit.score });
+    return demoProject;
   }
 
   /* 1. Design ------------------------------------------------------ */
@@ -247,21 +305,34 @@ export async function generateGame({ idea, options = {}, config, onEvent, signal
     files,
     notes,
     usage,
+    cost: tracker.snapshot(),
     failedBatches,
     meta: { createdAt: new Date().toISOString(), scale, provider: config.provider, model: config.model, idea },
   };
 
   project.validation = validateProject(project);
-  const repaired = await autoRepairProject(project, config, { onEvent: emit, signal, maxRounds: options.autoRepair === false ? 0 : 2 });
+  const repaired = await autoRepairProject(project, config, {
+    onEvent: emit, signal, tracker,
+    maxRounds: options.autoRepair === false ? 0 : 2,
+  });
   project.validation = repaired.validation;
   project.repairs = repaired.rounds;
+  project.usage = tracker.snapshot();
+  project.cost = tracker.snapshot();
+  project.audit = auditProject(project);
   emit({
     type: 'done',
     message: repaired.rounds ? `Projekt gotowy (auto-naprawa: ${repaired.rounds} runda/y).` : 'Projekt gotowy.',
     stats: project.validation.stats,
     warnings: project.validation.warnings,
     errors: project.validation.errors,
+    auditScore: project.audit.score,
+    cost: project.cost,
+    costLabel: formatUsd(project.cost.usd),
   });
+  if (project.audit.counts.errors) {
+    emit({ type: 'warn', message: `Audyt projektu: ${project.audit.summary}` });
+  }
   return project;
 }
 
@@ -269,7 +340,7 @@ export async function generateGame({ idea, options = {}, config, onEvent, signal
  * Auto-naprawa: walidator wskazuje błędy, model poprawia pliki.
  * Pętla kończy się, gdy walidacja jest czysta (albo po maxRounds).
  * ------------------------------------------------------------------ */
-export async function autoRepairProject(project, config, { onEvent, signal, maxRounds = 2 } = {}) {
+export async function autoRepairProject(project, config, { onEvent, signal, maxRounds = 2, tracker = null } = {}) {
   let validation = project.validation || validateProject(project);
   if (maxRounds <= 0 || !validation.errors.length) return { validation, rounds: 0 };
 
@@ -303,6 +374,11 @@ export async function autoRepairProject(project, config, { onEvent, signal, maxR
       usage.inputTokens += out.usage.inputTokens;
       usage.outputTokens += out.usage.outputTokens;
       usage.calls++;
+      if (tracker) {
+        const { total } = tracker.add(out.usage);
+        usage.usd = Number(total.toFixed(6));
+        usage.rate = tracker.rate;
+      }
 
       const produced = Array.isArray(out.data?.files) ? out.data.files : [];
       let changed = 0;
@@ -345,6 +421,11 @@ export async function refineProject({ project, instruction, config, options = {}
     throw new ProviderError('Opisz, co chcesz zmienić (np. "dodaj sklep i ranking graczy").');
   }
   const usage = project.usage || (project.usage = { inputTokens: 0, outputTokens: 0, calls: 0 });
+  const tracker = new CostTracker({
+    provider: config?.provider,
+    model: config?.model,
+    budget: budgetFor(options),
+  });
   const emit = (event) => onEvent?.(event);
 
   emit({ type: 'stage', stage: 'refine', message: `Wprowadzam zmianę: ${String(instruction).slice(0, 120)}` });
@@ -364,6 +445,7 @@ export async function refineProject({ project, instruction, config, options = {}
   usage.inputTokens += out.usage.inputTokens;
   usage.outputTokens += out.usage.outputTokens;
   usage.calls++;
+  tracker.add(out.usage);
 
   const changed = [];
   for (const file of out.data?.files || []) {
@@ -398,9 +480,18 @@ export async function refineProject({ project, instruction, config, options = {}
   project.notes = [...(project.notes || []), ...(out.data?.notes || []).map((n) => `[zmiana] ${n}`)];
   if (out.data?.summary) project.refinements = [...(project.refinements || []), { at: new Date().toISOString(), instruction, summary: out.data.summary }];
 
-  const repaired = await autoRepairProject(project, config, { onEvent: emit, signal, maxRounds: 2 });
+  const repaired = await autoRepairProject(project, config, { onEvent: emit, signal, maxRounds: 2, tracker });
   project.validation = repaired.validation;
-  emit({ type: 'done', message: out.data?.summary ? `Zmiana gotowa: ${out.data.summary}` : 'Zmiana gotowa.', stats: project.validation.stats });
+  project.usage = tracker.snapshot();
+  project.cost = tracker.snapshot();
+  project.audit = auditProject(project);
+  emit({
+    type: 'done',
+    message: out.data?.summary ? `Zmiana gotowa: ${out.data.summary}` : 'Zmiana gotowa.',
+    stats: project.validation.stats,
+    auditScore: project.audit.score,
+    costLabel: formatUsd(project.cost.usd),
+  });
   return project;
 }
 

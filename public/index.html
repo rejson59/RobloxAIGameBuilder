@@ -89,6 +89,14 @@
         <input type="checkbox" id="autorepair-input" checked />
         <span>Auto-naprawa: model poprawia własne błędy wykryte przez walidator</span>
       </label>
+      <label class="checkbox">
+        <input type="checkbox" id="stream-input" checked />
+        <span>Podgląd na żywo: pokazuj, jak model pisze kod (strumień)</span>
+      </label>
+      <label class="field">
+        <span>Limit wydatków na projekt (USD) <em>opcjonalnie</em></span>
+        <input id="max-cost-input" type="number" min="0" step="0.01" placeholder="np. 0.50 — pusty = bez limitu" />
+      </label>
       <button class="btn btn-ghost full" id="import-btn">Wczytaj projekt (ai-builder.json)</button>
       <input id="idea-file-input" type="file" accept="application/json,.json" class="hidden" />
     </section>
@@ -125,6 +133,11 @@
     <section class="card hidden" id="progress-card">
       <h2>Postęp</h2>
       <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
+      <div class="row row-between" style="margin-bottom:8px">
+        <span class="hint" id="live-info">—</span>
+        <span class="hint" id="cost-info"></span>
+      </div>
+      <pre class="code code-live hidden" id="live-preview"></pre>
       <div class="log" id="log"></div>
     </section>
 
@@ -154,6 +167,8 @@
         <button class="tab" data-tab="files">Pliki Luau <span id="tab-files-count"></span></button>
         <button class="tab" data-tab="refine">Zmień grę (AI)</button>
         <button class="tab" data-tab="studio">Wtyczka Studio</button>
+        <button class="tab" data-tab="audit">Audyt <span id="tab-audit-score"></span></button>
+        <button class="tab" data-tab="versions">Historia</button>
         <button class="tab" data-tab="world">Świat</button>
         <button class="tab" data-tab="arch">Architektura</button>
         <button class="tab" data-tab="export">Jak uruchomić</button>
@@ -168,11 +183,22 @@
             <div class="code-head">
               <code id="code-path">—</code>
               <div class="row">
+                <button class="btn btn-ghost btn-small" id="edit-file-btn">Edytuj</button>
                 <button class="btn btn-ghost btn-small" id="copy-code-btn">Kopiuj</button>
                 <button class="btn btn-ghost btn-small" id="download-file-btn">Pobierz plik</button>
               </div>
             </div>
-            <pre class="code"><code id="code-view"></code></pre>
+            <pre class="code" id="code-readonly"><code id="code-view"></code></pre>
+            <div class="edit-wrap hidden" id="edit-wrap">
+              <textarea id="edit-area" spellcheck="false"></textarea>
+              <div class="row row-between">
+                <span class="hint">Zapis = nowa wersja projektu. Wtyczka w Studiu z włączonym <em>Live sync</em> podmieni tylko ten skrypt.</span>
+                <div class="row">
+                  <button class="btn btn-ghost btn-small" id="edit-cancel-btn">Anuluj</button>
+                  <button class="btn btn-primary btn-small" id="save-file-btn">Zapisz zmiany</button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -220,10 +246,30 @@
             </label>
             <p class="hint">Wtyczka działa w Twoim Studiu na tej samej maszynie, dlatego używa
               <code>127.0.0.1</code> (nie adresu podglądu w chmurze).</p>
+            <h3 style="margin-top:18px">Assety: znaczniki z gry</h3>
+            <p class="hint">Kod może zawierać znaczniki typu <code>"placeholder:coin"</code>.
+              Wtyczka podmienia je jednym kliknięciem na darmowe assety z katalogu (przycisk
+              „Podmień znaczniki placeholder:…” w sekcji 3 panelu Studia).</p>
+            <div id="project-tags" class="tag-list"></div>
+            <label class="field">
+              <span>Katalog darmowych assetów</span>
+              <input id="asset-search" placeholder="np. laser, horror, metal, ui_click" />
+            </label>
+            <div id="asset-list" class="asset-list"></div>
+
             <h3 style="margin-top:18px">Podgląd kodu wtyczki</h3>
             <pre class="code code-small"><code id="plugin-source">Kliknij „Odśwież kod”, aby wczytać źródło wtyczki…</code></pre>
           </div>
         </div>
+      </div>
+
+      <div class="tab-panel hidden" id="panel-audit"></div>
+
+      <div class="tab-panel hidden" id="panel-versions">
+        <p class="hint">Każde wygenerowanie, zmiana przez AI i ręczna edycja pliku to nowa wersja.
+          Rollback tworzy kolejną wersję, więc nic nie ginie — a jeśli w Studiu włączysz <em>Live sync</em>,
+          miejsce zaktualizuje się samo.</p>
+        <div id="versions-list" class="versions-list"></div>
       </div>
 
       <div class="tab-panel hidden" id="panel-world"></div>

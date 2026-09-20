@@ -19,6 +19,10 @@ do folderu wtyczek Roblox Studio: **Plugins → Plugins Folder**).
 | **Zaślepki assetów** | Znajduje Decal/Sound/MeshId/ImageLabel bez wartości i pokazuje ich ścieżki; klik zaznacza instancję. |
 | **Darmowe assety** | Wstawia gotowe dźwięki i tekstury z biblioteki Robloxa (do podmiany jednym kliknięciem). |
 | **Ikona gry** | Pobiera proceduralną ikonę PNG 512×512 i zapisuje ją w folderze wtyczek. |
+| **Live sync** | Pilnuje rewizji projektu i podmienia w miejscu TYLKO zmienione skrypty (~2,5 s po zapisie w aplikacji). |
+| **Napraw błędy z Play** | Zbiera błędy runtime z `LogService` podczas Twojego testu i wysyła je do modelu jako zadanie naprawcze. |
+| **Podmień znaczniki placeholder:…** | Skanuje `placeholder:coin`, `placeholder:neon_grid` itd. i wstawia darmowe assety z katalogu. |
+| **Historia wersji** | Lista wersji projektu z „Przywróć” — cofa nieudaną zmianę i przebudowuje miejsce. |
 
 ## Wymagania dla funkcji AI
 

@@ -56,12 +56,14 @@ function emit(job, event) {
 function persistResult(job) {
   if (job.projectId || !job.result) return job.projectId;
   try {
-    const { id } = saveProject(job.result, {
+    const { id, revision } = saveProject(job.result, {
       id: job.result.projectId,
       note: job.type === 'refine' ? 'zmiana przez AI' : 'generowanie',
     });
     job.projectId = id;
+    job.revision = revision;
     job.result.projectId = id;
+    job.result.revision = revision;
   } catch (err) {
     job.saveError = err.message;
     console.warn(`[library] zapis nie udał się: ${err.message}`);
@@ -118,9 +120,9 @@ export function startJob(payload = {}) {
       job.result = project;
       job.status = 'done';
       const projectId = persistResult(job);
-      emit(job, { type: 'done', message: 'Gotowe.', stats: project.validation?.stats });
+      emit(job, { type: 'done', message: 'Gotowe.', stats: project.validation?.stats, auditScore: job.result?.audit?.score });
       // Projekt wysyłamy osobno, po "done": UI i wtyczka dostają go w tym samym strumieniu.
-      emit(job, { type: 'project', project, projectId: projectId || null, saved: Boolean(projectId) });
+      emit(job, { type: 'project', project, projectId: projectId || null, revision: job.revision || null, saved: Boolean(projectId) });
     } catch (err) {
       const aborted = job.controller.signal.aborted || err?.name === 'CancelledError';
       job.status = aborted ? 'cancelled' : 'error';
@@ -168,6 +170,7 @@ export function jobSnapshot(job, { includeProject = true } = {}) {
     error: job.error,
     elapsedMs: (job.finishedAt || Date.now()) - job.createdAt,
     projectId: job.projectId || null,
+    revision: job.revision || null,
     saved: Boolean(job.projectId),
     saveError: job.saveError || null,
     project: includeProject && job.status === 'done' ? job.result : undefined,
@@ -197,7 +200,7 @@ export function subscribeJob(job, res) {
   }
   if (job.status !== 'running') {
     if (job.status === 'done' && job.result) {
-      res.write(`data: ${JSON.stringify({ type: 'project', project: job.result, projectId: job.projectId || null, saved: Boolean(job.projectId) })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'project', project: job.result, projectId: job.projectId || null, revision: job.revision || null, saved: Boolean(job.projectId) })}\n\n`);
     }
     res.write(`data: ${JSON.stringify({ type: 'end', status: job.status })}\n\n`);
     res.end();

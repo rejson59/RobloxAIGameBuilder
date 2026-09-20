@@ -60,6 +60,7 @@ export function buildPluginPayload(project, { projectId = null } = {}) {
     summary: project.summary || '',
     genre: project.genre || project.design?.genre || '',
     projectId: projectId || project.projectId || null,
+    revision: project.revision ?? null,
     notes: (project.notes || []).slice(0, 12),
     files: (project.files || []).map((f) => ({ path: f.path, content: f.content })),
     design: project.design || null,
