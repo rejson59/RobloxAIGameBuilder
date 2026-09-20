@@ -19,12 +19,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 
 import { createZip, readZipEntries, crc32 } from '../server/zip.js';
+import { encodePng, readPngHeader } from '../server/png.js';
+import { renderThumbnail, thumbnailFilename } from '../server/thumbnail.js';
+import { startJob, getJob, jobSnapshot, cancelJob, subscribeJob, listJobs, runningJobs } from '../server/jobs.js';
+import { newProjectId, saveProject, listProjects, loadProject, loadVersion, deleteProject, projectsDir } from '../server/projects.js';
 import { buildRbxmx, buildRojoProject, planFileTree } from '../server/rbxmx.js';
-import { buildPlugin, toLuau } from '../server/plugin.js';
+import { buildPlugin, toLuau, buildPluginPayload } from '../server/plugin.js';
 import { assembleFiles, exportAs, projectSlug } from '../server/exporters.js';
 import { validateProject, normalisePath, isValidPath } from '../server/validate.js';
 import { DEMOS, getDemo, listDemos } from '../server/games.js';
-import { generateGame, planBatches } from '../server/pipeline.js';
+import { generateGame, planBatches, refineProject, autoRepairProject } from '../server/pipeline.js';
 import { publicProviders, getProvider } from '../server/providers.js';
 import { parseJsonLoose, slugify, safeInstanceName, eulerToMatrix, parseCFrame } from '../server/util.js';
 import { createServer } from '../server/index.js';
@@ -32,6 +36,10 @@ import { createServer } from '../server/index.js';
 /* ------------------------------------------------------------------ *
  * Tiny test runner
  * ------------------------------------------------------------------ */
+// Izolowana biblioteka: testy nie mogą śmiecić w .projects/ użytkownika.
+const TEST_LIBRARY = fs.mkdtempSync(path.join(os.tmpdir(), 'rbxai-test-lib-'));
+process.env.PROJECTS_DIR = TEST_LIBRARY;
+
 const results = { passed: 0, failed: 0, skipped: 0 };
 const failures = [];
 
@@ -109,7 +117,46 @@ await test('duże, dobrze kompresowalne pliki są deflate-owane (mniejszy rozmia
 });
 
 /* ================================================================== */
-section('2. rbxmx.js – model Roblox Studio');
+section('2. png.js + thumbnail.js – generator ikon');
+
+await test('encodePng: poprawny nagłówek PNG i odczyt rozmiaru', () => {
+  const rgb = Buffer.alloc(16 * 16 * 3, 128);
+  const png = encodePng(16, 16, rgb);
+  assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  const header = readPngHeader(png);
+  assert.equal(header.width, 16);
+  assert.equal(header.height, 16);
+  assert.equal(header.bitDepth, 8);
+  assert.equal(header.colorType, 2);
+  assert.equal(png.readUInt32BE(png.length - 4), crc32(png.subarray(png.length - 8, png.length - 4)));
+});
+
+await test('encodePng: zły rozmiar bufora jest odrzucany', () => {
+  assert.throws(() => encodePng(8, 8, Buffer.alloc(10)), /oczekiwano/);
+});
+
+await test('renderThumbnail: PNG 512x512, różne palety dla różnych gatunków', () => {
+  const obby = renderThumbnail({ name: 'Neon Skyway Obby', genre: 'Obby' });
+  const thumb = readPngHeader(obby);
+  assert.equal(thumb.width, 512);
+  assert.equal(thumb.height, 512);
+  assert.ok(obby.length > 4000, `ikona powinna mieć sensowny rozmiar (${obby.length} B)`);
+
+  const horror = renderThumbnail({ name: 'Blackout Ward', genre: 'Horror' }, { size: 256 });
+  assert.equal(readPngHeader(horror).width, 256);
+  assert.notDeepEqual(obby, horror, 'ikony różnych gatunków nie mogą być identyczne');
+  assert.equal(thumbnailFilename({ name: 'Neon Skyway Obby' }), 'neon-skyway-obby-icon.png');
+});
+
+await test('renderThumbnail: radzi sobie z bardzo długim tytułem i brakiem danych', () => {
+  const long = renderThumbnail({ name: 'Bardzo Długa Nazwa Gry Która Nie Zmieści Się W Jednej Linii Ani W Dwóch' });
+  assert.ok(readPngHeader(long).width === 512);
+  const empty = renderThumbnail({}, { size: 128 });
+  assert.equal(readPngHeader(empty).width, 128);
+});
+
+/* ================================================================== */
+section('3. rbxmx.js – model Roblox Studio');
 
 const sampleProject = {
   name: 'Test Game',
@@ -189,7 +236,7 @@ await test('planFileTree: ścieżki spoza src/ trafiają do ServerStorage z ostr
 });
 
 /* ================================================================== */
-section('3. plugin.js – wtyczka Studio');
+section('4. plugin.js – wtyczka Studio');
 
 await test('toLuau: poprawne escapowanie stringów Luau', () => {
   const output = toLuau({ a: 'linia\n"cudzysłów"\t\\backslash', b: [1, 2, 3], c: true, d: null });
@@ -205,24 +252,52 @@ await test('toLuau: klucze niebędące identyfikatorami są cytowane', () => {
   assert.match(output, /normal = 2/);
 });
 
-await test('buildPlugin: osadza wszystkie pliki i mapuje klasy skryptów', () => {
-  const source = buildPlugin(sampleProject);
+await test('buildPlugin: osadza projekt, konfigurację i pełne UI', () => {
+  const source = buildPlugin(sampleProject, { serverUrl: 'http://127.0.0.1:5173', provider: 'openai', model: 'gpt-4.1-mini' });
   assert.match(source, /local PROJECT = \{/);
-  assert.match(source, /src\/server\/Bootstrap\.server\.luau/);
+  assert.match(source, /local PROJECT_CONFIG = \{/);
+  assert.match(source, /"http:\/\/127\.0\.0\.1:5173"/);
   assert.match(source, /Bootstrap\.server\.luau/);
-  assert.match(source, /className = "Script"/);
-  assert.match(source, /className = "LocalScript"/);
+  assert.match(source, /scriptClassFor/);
+  assert.match(source, /return "Script"/);
+  assert.match(source, /return "LocalScript"/);
   assert.match(source, /plugin:CreateToolbar/);
+  assert.match(source, /DockWidgetPluginGuiInfo/);
   assert.match(source, /ChangeHistoryService/);
   assert.match(source, /Buduj grę/);
 });
 
+await test('buildPlugin: panel wtyczki ma generator AI, zaślepki, darmowe assety i ikonę', () => {
+  const source = buildPlugin(sampleProject);
+  assert.match(source, /\/api\/refine/);          // "poproś o zmianę" z wnętrza Studio
+  assert.match(source, /\/api\/jobs\/\" \.\. jobId/);   // polling zadania z panelu wtyczki
+  assert.match(source, /\/api\/thumbnail/);       // zapis ikony do folderu wtyczek
+  assert.match(source, /findPlaceholders/);
+  assert.match(source, /FREE_ASSETS/);
+  assert.match(source, /insertFreeAsset/);
+  assert.match(source, /projectPayloadForRefine/);
+  assert.match(source, /HttpEnabled/);
+});
+
+await test('buildPluginPayload: pełny projekt (design, plan, świat, światła)', () => {
+  const payload = buildPluginPayload({ ...sampleProject, design: { genre: 'Obby' }, plan: { architecture: 'x' } }, { projectId: 'abc' });
+  assert.equal(payload.name, 'Test Game');
+  assert.equal(payload.projectId, 'abc');
+  assert.equal(payload.files.length, 4);
+  assert.equal(payload.world.children.length, 4);
+  assert.equal(payload.lighting.ClockTime, 15);
+  assert.equal(payload.design.genre, 'Obby');
+});
+
 await test('buildPlugin: wygenerowany kod wtyczki jest poprawnym Luau', () => {
-  assertLuauParses(buildPlugin(sampleProject), 'plugin');
+  assertLuauParses(buildPlugin(sampleProject, { serverKeyPlaceholder: true }), 'plugin');
+  for (const demo of DEMOS) {
+    assertLuauParses(buildPlugin(demo), `plugin/${demo.id}`);
+  }
 });
 
 /* ================================================================== */
-section('4. exporters.js – artefakty do pobrania');
+section('5. exporters.js – artefakty do pobrania');
 
 await test('assembleFiles: dołącza README, default.project.json, .gitignore, docs i ai-builder.json', () => {
   const project = {
@@ -264,7 +339,7 @@ await test('exportAs: nazwy plików i typy MIME dla każdego formatu', () => {
 });
 
 /* ================================================================== */
-section('5. validate.js – bramka jakości');
+section('6. validate.js – bramka jakości');
 
 await test('normalisePath / isValidPath', () => {
   assert.equal(normalisePath('./src\\server\\A.luau'), 'src/server/A.luau');
@@ -302,7 +377,7 @@ await test('poprawny projekt przechodzi bez błędów', () => {
 });
 
 /* ================================================================== */
-section('6. util.js – parsowanie odpowiedzi modelu');
+section('7. util.js – parsowanie odpowiedzi modelu');
 
 await test('parseJsonLoose: obsługuje fence, śmieci przed JSON-em i trailing commas', () => {
   assert.deepEqual(parseJsonLoose('```json\n{"a":1}\n```'), { a: 1 });
@@ -328,7 +403,7 @@ await test('eulerToMatrix / parseCFrame: 90° wokół Y', () => {
 });
 
 /* ================================================================== */
-section('7. providers.js – BYOK');
+section('8. providers.js – BYOK');
 
 await test('rejestr dostawców jest kompletny i spójny', () => {
   const providers = publicProviders();
@@ -347,7 +422,7 @@ await test('rejestr dostawców jest kompletny i spójny', () => {
 });
 
 /* ================================================================== */
-section('8. pipeline.js – orkiestracja');
+section('9. pipeline.js – orkiestracja');
 
 await test('planBatches: kolejność shared -> moduły serwera -> bootstrap -> server -> client', () => {
   const files = [
@@ -394,7 +469,7 @@ await test('generateGame bez demo i bez klucza zwraca czytelny błąd', async ()
 });
 
 /* ================================================================== */
-section('9. dema offline – zawartość i składnia Luau');
+section('10. dema offline – zawartość i składnia Luau');
 
 for (const demo of DEMOS) {
   await test(`demo "${demo.id}" (${demo.name}): pliki, walidacja, składnia Luau`, () => {
@@ -424,6 +499,9 @@ await test('getDemo: aliasy, id i dopasowanie do opisu', () => {
   assert.equal(getDemo('obby').id, 'obby');
   assert.equal(getDemo('tower-defense').id, 'td');
   assert.equal(getDemo('pvp').id, 'arena');
+  assert.equal(getDemo('tycoon').id, 'tycoon');
+  assert.equal(getDemo('horror').id, 'horror');
+  assert.equal(getDemo('gra o piekarni z maszynami').id, 'tycoon');
   assert.equal(getDemo('Chcę tower defense z wieżami').id, 'td');
   assert.equal(getDemo('arena pvp shooter').id, 'arena');
   assert.equal(getDemo('nieznany tekst').id, 'obby');
@@ -431,7 +509,135 @@ await test('getDemo: aliasy, id i dopasowanie do opisu', () => {
 });
 
 /* ================================================================== */
-section('10. serwer HTTP – pełny przepływ');
+section('11. jobs.js + projects.js – zadania i biblioteka');
+
+await test('startJob (demo): status done, snapshot dla wtyczki zawiera projekt', async () => {
+  const job = startJob({ type: 'generate', idea: 'obby', options: { demo: true, demoId: 'obby' }, config: {} });
+  assert.ok(job.id.startsWith('job_'));
+  assert.equal(getJob(job.id).status, 'running');
+  for (let i = 0; i < 60 && job.status === 'running'; i++) await new Promise((r) => setTimeout(r, 25));
+  assert.equal(job.status, 'done', job.error || '');
+  const snapshot = jobSnapshot(job);
+  assert.equal(snapshot.progress, 1);
+  assert.ok(snapshot.events.some((e) => e.type === 'done'));
+  assert.ok(snapshot.project, 'snapshot po zakończeniu musi zawierać projekt');
+  assert.ok(snapshot.elapsedMs >= 0);
+});
+
+await test('jobSnapshot: wtyczka może pobrać projekt tylko raz na żądanie', async () => {
+  const job = startJob({ type: 'generate', idea: 'td', options: { demo: true, demoId: 'td' }, config: {} });
+  for (let i = 0; i < 60 && job.status === 'running'; i++) await new Promise((r) => setTimeout(r, 25));
+  assert.equal(jobSnapshot(job, { includeProject: false }).project, undefined);
+  assert.ok(jobSnapshot(job, { includeProject: true }).project);
+});
+
+await test('cancelJob zatrzymuje generowanie bez klucza API', async () => {
+  const job = startJob({ type: 'generate', idea: 'gra', config: { provider: 'custom', baseUrl: 'http://127.0.0.1:1', model: 'x' } });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(cancelJob(job.id), true);
+  for (let i = 0; i < 40 && job.status === 'running'; i++) await new Promise((r) => setTimeout(r, 25));
+  assert.equal(job.status, 'error');           // brak serwera -> błąd połączenia
+  assert.equal(cancelJob('nie-ma-takiego'), false);
+  assert.ok(listJobs().length >= 1);
+  assert.ok(runningJobs() >= 0);
+});
+
+await test('subscribeJob: SSE odtwarza historię i kończy strumień', async () => {
+  const job = startJob({ type: 'generate', idea: 'arena', options: { demo: true, demoId: 'arena' }, config: {} });
+  for (let i = 0; i < 60 && job.status === 'running'; i++) await new Promise((r) => setTimeout(r, 25));
+  const fake = {
+    chunks: [],
+    writeHead() {},
+    write(chunk) { this.chunks.push(chunk); },
+    end() { this.ended = true; },
+    on() {},
+    get writableEnded() { return Boolean(this.ended); },
+  };
+  subscribeJob(job, fake);
+  const text = fake.chunks.join('');
+  assert.match(text, /"type":"open"/);
+  assert.match(text, /"type":"project"/);
+  assert.match(text, /"type":"end"/);
+  assert.equal(fake.ended, true);
+});
+
+await test('zakończone zadanie zapisuje projekt w bibliotece i publikuje je w strumieniu', async () => {
+  const job = startJob({ type: 'generate', idea: 'arena', options: { demo: true, demoId: 'arena' }, config: {} });
+  const chunks = [];
+  const fake = {
+    chunks, writeHead() {}, write(c) { chunks.push(c); },
+    end() { this.ended = true; }, on() {},
+    get writableEnded() { return Boolean(this.ended); },
+  };
+  // Subskrypcja od razu po starcie: albo strumień na żywo, albo odtworzenie historii –
+  // w obu przypadkach UI musi dostać zdarzenie "project" i "end".
+  subscribeJob(job, fake);
+  for (let i = 0; i < 60 && job.status === 'running'; i++) await new Promise((r) => setTimeout(r, 25));
+  assert.equal(job.status, 'done');
+  const text = chunks.join('');
+  assert.match(text, /"type":"project"/);
+  assert.match(text, /"type":"end"/);
+  assert.ok(job.projectId, 'brak id zapisanego projektu');
+  assert.ok(loadProject(job.projectId), 'projekt nie został zapisany');
+  assert.equal(jobSnapshot(job).projectId, job.projectId);
+  assert.equal(jobSnapshot(job).saved, true);
+});
+
+await test('biblioteka projektów: zapis, wersje, listowanie, wczytanie, usuwanie', () => {
+  const previous = process.env.PROJECTS_DIR;
+  process.env.PROJECTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'rbxai-lib-'));
+  try {
+    assert.ok(projectsDir().includes('rbxai-lib-'));
+    const id = newProjectId('Testowa Gra');
+    assert.match(id, /^testowa-gra-\d{4}-\d{2}-\d{2}-[a-z0-9]{4}$/);
+
+    const saved = saveProject(structuredClone(sampleProject), { id, note: 'pierwsza wersja' });
+    assert.equal(saved.id, id);
+    assert.equal(saved.versions, 1);
+
+    const second = structuredClone(sampleProject);
+    second.files[0].content = 'print("zmienione")\n';
+    saveProject(second, { id, note: 'druga wersja' });
+
+    const listed = listProjects();
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].versions, 2);
+    assert.equal(listed[0].files, 4);
+
+    const loaded = loadProject(id);
+    assert.equal(loaded.files[0].content, 'print("zmienione")\n');
+    const restored = loadVersion(id, 1);
+    assert.equal(restored.files[0].content, 'print("sample")\n'.replace('sample', 'server'));
+    assert.equal(restored.restoredFrom, 1);
+
+    assert.equal(deleteProject(id), true);
+    assert.equal(listProjects().length, 0);
+    assert.equal(loadProject(id), null);
+    assert.equal(loadVersion(id, 0), null);
+  } finally {
+    if (previous === undefined) delete process.env.PROJECTS_DIR;
+    else process.env.PROJECTS_DIR = previous;
+  }
+});
+
+await test('refineProject wymaga projektu i instrukcji (bez wywołań API)', async () => {
+  await assert.rejects(() => refineProject({ project: null, instruction: 'cokolwiek', config: {} }), /Brak projektu/);
+  await assert.rejects(
+    () => refineProject({ project: sampleProject, instruction: '   ', config: {} }),
+    /Opisz, co chcesz zmienić/,
+  );
+});
+
+await test('autoRepairProject: czysty projekt nie potrzebuje naprawy', async () => {
+  const project = structuredClone(sampleProject);
+  project.validation = validateProject(project);
+  const { rounds, validation } = await autoRepairProject(project, { provider: 'openai', apiKey: '', model: 'x' }, {});
+  assert.equal(rounds, 0);
+  assert.equal(validation.errors.length, 0);
+});
+
+/* ================================================================== */
+section('12. serwer HTTP – pełny przepływ');
 
 const server = createServer();
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -457,14 +663,15 @@ await test('GET /api/providers i /api/demos', async () => {
   assert.equal(demos.json.demos.length, DEMOS.length);
 });
 
-await test('POST /api/demo zwraca projekt z walidacją', async () => {
+await test('POST /api/demo zwraca projekt z walidacją i zapisuje go w bibliotece', async () => {
   const { json } = await getJson('/api/demo', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: 'arena' }),
+    body: JSON.stringify({ id: 'arena', save: false }),
   });
   assert.equal(json.project.id, 'arena');
   assert.equal(json.project.validation.errors.length, 0);
+  assert.equal(json.projectId, null);
 });
 
 await test('POST /api/export?format=zip zwraca prawdziwy ZIP w nagłówku attachment', async () => {
@@ -481,32 +688,85 @@ await test('POST /api/export?format=zip zwraca prawdziwy ZIP w nagłówku attach
   assert.ok(entries.some((e) => e.path === 'default.project.json'));
 });
 
-await test('POST /api/export?format=rbxmx|plugin zwraca pliki do pobrania', async () => {
-  const rbxmx = await fetch(`${base}/api/export`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ project: sampleProject, format: 'rbxmx' }),
-  });
-  const xml = await rbxmx.text();
-  assert.match(xml, /<roblox /);
-  assert.match(rbxmx.headers.get('content-disposition'), /test-game\.rbxmx/);
+await test('POST /api/export: rbxmx, rbxlx (miejsce) i wtyczka Studio', async () => {
+  for (const [format, pattern] of [['rbxmx', /test-game\.rbxmx/], ['place', /test-game\.rbxlx/]]) {
+    const res = await fetch(`${base}/api/export`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project: sampleProject, format }),
+    });
+    const xml = await res.text();
+    assert.match(xml, /<roblox /);
+    assert.match(res.headers.get('content-disposition'), pattern);
+  }
 
   const plugin = await fetch(`${base}/api/export`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ project: sampleProject, format: 'plugin' }),
+    body: JSON.stringify({ project: sampleProject, format: 'plugin', serverUrl: 'http://127.0.0.1:9999' }),
   });
   const source = await plugin.text();
   assert.ok(source.includes('local PROJECT'), 'wtyczka nie zawiera osadzonego projektu');
+  assert.ok(source.includes('http://127.0.0.1:9999'), 'adres serwera nie trafił do wtyczki');
+  assert.ok(source.includes('DockWidgetPluginGuiInfo'), 'wtyczka bez panelu UI');
   assert.match(plugin.headers.get('content-disposition'), /test-game\.plugin\.luau/);
+  assertLuauParses(source, 'plugin z API');
 });
 
-await test('POST /api/generate (SSE) w trybie demo emituje zdarzenia i projekt', async () => {
-  const res = await fetch(`${base}/api/generate`, {
+await test('GET /api/thumbnail zwraca PNG 512x512', async () => {
+  const res = await fetch(`${base}/api/thumbnail?name=Neon%20Obby&genre=Obby`);
+  assert.equal(res.headers.get('content-type'), 'image/png');
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const header = readPngHeader(buffer);
+  assert.equal(header.width, 512);
+  assert.equal(header.height, 512);
+});
+
+await test('biblioteka przez HTTP: generate (demo) -> jobs -> library -> delete', async () => {
+  const start = await getJson('/api/generate', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jobId: 'test-job', idea: 'obby', options: { demo: true, demoId: 'obby' }, config: {} }),
+    body: JSON.stringify({ idea: 'obby', options: { demo: true, demoId: 'obby' }, config: {} }),
   });
+  const jobId = start.json.jobId;
+  assert.ok(jobId, 'brak jobId');
+
+  let snapshot = null;
+  for (let i = 0; i < 80; i++) {
+    const poll = await getJson(`/api/jobs/${jobId}`);
+    snapshot = poll.json;
+    if (snapshot.status !== 'running') break;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  assert.equal(snapshot.status, 'done', snapshot.error || '');
+  assert.ok(snapshot.project, 'snapshot bez projektu');
+  assert.ok(snapshot.projectId, 'projekt nie został zapisany w bibliotece');
+
+  const library = await getJson('/api/library');
+  assert.ok(library.json.projects.some((p) => p.id === snapshot.projectId), 'brak projektu w bibliotece');
+
+  const opened = await getJson(`/api/library/${snapshot.projectId}`);
+  assert.equal(opened.json.project.files.length, snapshot.project.files.length);
+  assert.equal(opened.json.validation.errors.length, 0);
+
+  const versions = await getJson(`/api/versions/${snapshot.projectId}/0`);
+  assert.ok(versions.json.project.files.length > 0);
+
+  const deleted = await getJson(`/api/library/${snapshot.projectId}/delete`, { method: 'POST' });
+  assert.equal(deleted.json.deleted, true);
+
+  const missing = await fetch(`${base}/api/library/${snapshot.projectId}`);
+  assert.equal(missing.status, 404);
+});
+
+await test('GET /api/jobs/:id/stream (SSE) w trybie demo emituje zdarzenia i projekt', async () => {
+  const start = await fetch(`${base}/api/generate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ idea: 'obby', options: { demo: true, demoId: 'obby' }, config: {} }),
+  });
+  const { jobId } = await start.json();
+  const res = await fetch(`${base}/api/jobs/${jobId}/stream`);
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type'), /text\/event-stream/);
   const text = await res.text();
@@ -519,8 +779,26 @@ await test('POST /api/generate (SSE) w trybie demo emituje zdarzenia i projekt',
   assert.ok(events.some((e) => e.type === 'done'));
   const projectEvent = events.find((e) => e.type === 'project');
   assert.ok(projectEvent, 'brak zdarzenia project');
-  assert.equal(projectEvent.project.name.length > 3, true);
   assert.ok(projectEvent.project.files.length >= 6);
+  assert.ok(events.some((e) => e.type === 'end'));
+});
+
+await test('POST /api/refine bez klucza API zwraca błąd w zadaniu (nie wywala serwera)', async () => {
+  const start = await getJson('/api/refine', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ project: sampleProject, instruction: 'dodaj sklep', config: { provider: 'openai', model: 'gpt-4.1-mini', apiKey: '' } }),
+  });
+  const jobId = start.json.jobId;
+  assert.ok(jobId);
+  let snapshot = null;
+  for (let i = 0; i < 80; i++) {
+    snapshot = (await getJson(`/api/jobs/${jobId}`)).json;
+    if (snapshot.status !== 'running') break;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  assert.equal(snapshot.status, 'error');
+  assert.match(snapshot.error, /klucz API/i);
 });
 
 await test('nieznany endpoint zwraca 404 JSON, a statyki działają', async () => {
@@ -541,7 +819,7 @@ await test('nieznany endpoint zwraca 404 JSON, a statyki działają', async () =
 await new Promise((resolve) => server.close(resolve));
 
 /* ================================================================== */
-section('11. CLI – eksport offline do katalogu');
+section('13. CLI – eksport offline do katalogu');
 
 await test('npm run demo:export produkuje kompletny zestaw plików', async () => {
   const { execFileSync } = await import('node:child_process');
@@ -550,7 +828,7 @@ await test('npm run demo:export produkuje kompletny zestaw plików', async () =>
     path.join(import.meta.dirname, '..', 'server', 'cli.js'),
     '--demo', 'obby',
     '--out', outDir,
-    '--formats', 'zip,rbxmx,plugin,rojo',
+    '--formats', 'zip,rbxmx,place,plugin,rojo',
     '--quiet',
   ], { stdio: 'pipe' });
 
@@ -558,6 +836,7 @@ await test('npm run demo:export produkuje kompletny zestaw plików', async () =>
   const zipName = listing.find((f) => f.endsWith('-rojo.zip'));
   assert.ok(zipName, `brak ZIP-a (jest: ${listing.join(', ')})`);
   assert.ok(listing.includes('neon-skyway-obby.rbxmx'), `brak .rbxmx (jest: ${listing.join(', ')})`);
+  assert.ok(listing.includes('neon-skyway-obby.rbxlx'), 'brak .rbxlx (miejsce)');
   assert.ok(listing.some((f) => f.endsWith('.plugin.luau')), 'brak wtyczki');
   assert.ok(fs.existsSync(path.join(outDir, 'src', 'shared', 'Config.luau')), 'brak plików źródłowych');
   assert.ok(fs.existsSync(path.join(outDir, 'default.project.json')), 'brak default.project.json');
@@ -573,6 +852,8 @@ await test('npm run demo:export produkuje kompletny zestaw plików', async () =>
 });
 
 /* ================================================================== */
+fs.rmSync(TEST_LIBRARY, { recursive: true, force: true });
+
 process.stdout.write(`\n\x1b[1mWynik:\x1b[0m ${results.passed} przeszło, ${results.failed} nie przeszło, ${results.skipped} pominięto\n`);
 if (!luauParse) {
   process.stdout.write('\x1b[33mUwaga:\x1b[0m brak pakietu luau-parser (npm install) – pominięto sprawdzanie składni Luau.\n');

@@ -1,22 +1,36 @@
 --[[
-	Roblox AI Game Builder – wygenerowana wtyczka z wbudowaną grą.
+	Roblox AI Game Builder – wtyczka Studio z wbudowaną grą i generatorem AI.
 
 	Gra: Neon Skyway Obby
 	Pokonaj 26 ruchomych platform nad jeziorem lawy – checkpoint po checkpoincie.
 	Pliki Luau: 6 | Wygenerowano: 2026-09-20
+	Adres lokalnego buildera: http://127.0.0.1:5173
+	Klucz API nie jest zapisany w tym pliku – bezpieczniej.
 
-	Instalacja:
-	  1. Zapisz ten plik na dysku jako RobloxAIGameBuilder.plugin.luau
-	  2. W Roblox Studio: Plugins -> Plugins Folder (otworzy folder w eksploratorze plików)
-	  3. Skopiuj plik do tego folderu
-	  4. Wróć do Studio: Plugins -> Manage Plugins i włącz wtyczkę (albo zrestartuj Studio)
-	  5. Na pasku wtyczek pojawi się "Roblox AI Game Builder" -> "Buduj grę"
+	INSTALACJA
+	  1. Zapisz ten plik jako RobloxAIGameBuilder.plugin.luau
+	  2. W Roblox Studio: Plugins -> Plugins Folder (otworzy folder w eksploratorze)
+	  3. Skopiuj plik do tego folderu i zrestartuj Studio
+	  4. Na pasku wtyczek: "Roblox AI Game Builder"
+	       - "Buduj grę"  -> wstawia mapę i skrypty w otwarte miejsce
+	       - "AI Builder" -> panel: zmiany przez AI, skan zaślepek, darmowe assety, ikona
+
+	ZMIANY PRZEZ AI wymagają uruchomionego lokalnego buildera (w folderze projektu: npm start)
+	oraz włączonego "Allow HTTP Requests" w Game Settings -> Security.
 ]]
 --!nocheck
 
 local PROJECT = {
 	name = "Neon Skyway Obby",
 	tagline = "Pokonaj 26 ruchomych platform nad jeziorem lawy – checkpoint po checkpoincie.",
+	summary = "Proceduralny tor parkour nad przepaścią z lawą. Każda platforma jest inna, część jeździ w bok, a każdy szósty etap to checkpoint, do którego wracasz po śmierci. Zbierasz monety i ścigasz się z czasem.",
+	genre = "Obby",
+	projectId = nil,
+	notes = {
+		"Tor buduje się proceduralnie z seeda Config.Seed – zmiana liczby = nowy level, bez rysowania w Studio.",
+		"Checkpointy to SpawnLocation-y ustawiane jako player.RespawnLocation, więc respawn działa \"z pudelka\" i jest po stronie serwera.",
+		"Całe UI powstaje w kodzie, więc projekt nie zależy od żadnego assetu z Toolboxa.",
+	},
 	files = {
 		{
 			path = "src/shared/Config.luau",
@@ -41,6 +55,201 @@ local PROJECT = {
 		{
 			path = "src/client/Effects.client.luau",
 			content = "--[[\n\tEffects – odczucia gracza: rozmycie prędkości (FOV), efekt śmierci,\n\tlekki wstrząs kamery przy upadku. Wyłącznie warstwa klienta.\n]]\nlocal Players = game:GetService(\"Players\")\nlocal RunService = game:GetService(\"RunService\")\nlocal TweenService = game:GetService(\"TweenService\")\nlocal Lighting = game:GetService(\"Lighting\")\n\nlocal player = Players.LocalPlayer\nlocal camera = workspace.CurrentCamera\n\nlocal BASE_FOV = 70\nlocal FAST_FOV = 88\nlocal currentFov = BASE_FOV\n\nlocal colorCorrection = Lighting:FindFirstChild(\"ObbyGrading\")\nif not colorCorrection then\n\tcolorCorrection = Instance.new(\"ColorCorrectionEffect\")\n\tcolorCorrection.Name = \"ObbyGrading\"\n\tcolorCorrection.Saturation = 0.08\n\tcolorCorrection.Contrast = 0.06\n\tcolorCorrection.Parent = Lighting\nend\n\nlocal function onCharacter(character)\n\tlocal humanoid = character:WaitForChild(\"Humanoid\")\n\tlocal root = character:WaitForChild(\"HumanoidRootPart\")\n\n\thumanoid.Died:Connect(function()\n\t\t-- Czerwony błysk + mocny zoom = czytelny sygnał \"przegrałeś\".\n\t\tlocal flash = Instance.new(\"ColorCorrectionEffect\")\n\t\tflash.Name = \"DeathFlash\"\n\t\tflash.Saturation = -0.4\n\t\tflash.Contrast = 0.5\n\t\tflash.TintColor = Color3.fromHex(\"#FF4A4A\")\n\t\tflash.Parent = Lighting\n\n\t\tcamera.FieldOfView = 92\n\t\tTweenService:Create(camera, TweenInfo.new(0.5), { FieldOfView = BASE_FOV }):Play()\n\t\tTweenService:Create(flash, TweenInfo.new(0.9), { Contrast = 0, Saturation = 0, TintColor = Color3.new(1, 1, 1) }):Play()\n\t\ttask.wait(1)\n\t\tflash:Destroy()\n\tend)\n\n\t-- Wstrząs kamery podczas szybkiego spadania: im szybciej, tym mocniej.\n\tRunService.RenderStepped:Connect(function(dt)\n\t\tif not root or not root.Parent or humanoid.Health <= 0 then\n\t\t\treturn\n\t\tend\n\t\tlocal velocity = root.AssemblyLinearVelocity\n\t\tlocal fallSpeed = math.clamp(-velocity.Y, 0, 220)\n\n\t\tlocal targetFov = BASE_FOV + (FAST_FOV - BASE_FOV) * (fallSpeed / 220)\n\t\tcurrentFov += (targetFov - currentFov) * math.clamp(dt * 6, 0, 1)\n\t\tcamera.FieldOfView = currentFov\n\n\t\tif fallSpeed > 140 then\n\t\t\tlocal strength = (fallSpeed - 140) / 80 * 0.6\n\t\t\tcamera.CFrame = camera.CFrame * CFrame.new(\n\t\t\t\t(math.random() - 0.5) * strength * 0.35,\n\t\t\t\t(math.random() - 0.5) * strength * 0.35,\n\t\t\t\t0\n\t\t\t)\n\t\tend\n\tend)\nend\n\nif player.Character then\n\ttask.spawn(onCharacter, player.Character)\nend\nplayer.CharacterAdded:Connect(onCharacter)\n",
+		},
+	},
+	design = {
+		name = "Neon Skyway Obby",
+		tagline = "Pokonaj 26 ruchomych platform nad jeziorem lawy – checkpoint po checkpoincie.",
+		genre = "Obby / Platformówka",
+		summary = "Proceduralny tor parkour nad przepaścią z lawą. Każda platforma jest inna, część jeździ w bok, a każdy szósty etap to checkpoint, do którego wracasz po śmierci. Zbierasz monety i ścigasz się z czasem.",
+		coreLoop = "1. Skok na kolejną platformę. 2. Unikaj lawy i ruchomych przeszkód. 3. Zaliczenie checkpointu zapisuje postęp. 4. Zbieraj monety po drodze. 5. Dotrzyj do mety po nagrodę.",
+		sessionLength = "3-8 min",
+		audience = "9-14 lat, gracze obby i speedrunów",
+		monetizationIdeas = {
+			"Gamepass \"Respawn w miejscu śmierci\" – najczęstszy zakup w obby, bo skraca frustrację.",
+			"Gamepass \"Podwójne monety\" dla graczy farmiących sklep.",
+			"Dev product \"Pomiń etap\" – ratunek dla graczy tkwiących na trudnym skoku.",
+		},
+		systems = {
+			{
+				name = "Proceduralny tor",
+				purpose = "Nieograniczona regrywalność z jednego seeda",
+				serverAuthority = "Seed i geometria istnieją tylko na serwerze",
+				keyParameters = {
+					PlatformCount = 26,
+					GapMin = 9,
+					GapMax = 18,
+					HeightStep = 2,
+				},
+			},
+			{
+				name = "Checkpointy",
+				purpose = "Postęp bez frustracji",
+				serverAuthority = "Serwer trzyma numer etapu; klient nie może go podnieść",
+				keyParameters = {
+					CheckpointEvery = 6,
+					StartStage = 1,
+				},
+			},
+			{
+				name = "Lawa (KillBricks)",
+				purpose = "Kara za błąd bez utraty całego postępu",
+				serverAuthority = "Kolizja i śmierć liczone na serwerze",
+				keyParameters = {
+					LavaDrop = 6,
+				},
+			},
+			{
+				name = "Monety",
+				purpose = "Opłata za sklep i nagroda za eksplorację",
+				serverAuthority = "Flaga Collected na instancji, 12 s respawn",
+				keyParameters = {
+					CoinCount = 14,
+					Reward = 1,
+					FinishBonus = 100,
+				},
+			},
+			{
+				name = "Ruchome platformy",
+				purpose = "Zmienia timing skoków, podnosi skill ceiling",
+				serverAuthority = "Tween serwerowy (deterministyczny)",
+				keyParameters = {
+					MovingEvery = 5,
+					MovingSpeed = 0.35,
+				},
+			},
+			{
+				name = "Statystyki (leaderstats)",
+				purpose = "Widoczna rywalizacja: etap i monety",
+				serverAuthority = "Tylko serwer zapisuje wartości",
+				keyParameters = {
+					RankedStats = {
+						"Stage",
+						"Coins",
+					},
+				},
+			},
+		},
+		controls = {
+			{
+				input = "WASD",
+				action = "Ruch postaci (WalkSpeed 18)",
+			},
+			{
+				input = "Space",
+				action = "Skok (JumpPower 52)",
+			},
+			{
+				input = "R",
+				action = "Reset postaci po utknięciu",
+			},
+			{
+				input = "H",
+				action = "Ukryj/pokaż HUD",
+			},
+			{
+				input = "Kółko myszy",
+				action = "Zoom kamery",
+			},
+		},
+		objectives = {
+			"Przejdź wszystkie 26 etapów i dotrzyj do zielonej mety.",
+			"Zbierz 14 monet po drodze.",
+			"Pobij swój czas na torze (timer w HUD).",
+		},
+		progression = "Monety (1 za sztukę, 100 za metę) → sklep z gamepassami: podwójne monety, respawn w miejscu śmierci. Etapy zapisane w leaderstats = ranking na serwerze.",
+		balancing = {
+			WalkSpeed = 18,
+			JumpPower = 52,
+			GapMin = 9,
+			GapMax = 18,
+			HeightStep = 2,
+			CheckpointEvery = 6,
+			MovingEvery = 5,
+			LavaDrop = 6,
+			CoinCount = 14,
+			FinishBonus = 100,
+		},
+		worldLayout = "Lobby to ciemna platforma 40x40 studsów z neapolitańskim spawnem i tablicą z zasadami. Za lobby (rosnące Z) rozciąga się wygenerowany tor: 26 platform, każda 5-12 studsów, różnice wysokości do 2 studsów, odstępy 9-18 studsów. Pod platformami na Y-6 znajduje się lawa pokrywająca wszystkie szczeliny. Co 6. platforma ma świecący checkpoint, co 5. jeździ w bok o 6-12 studsów. Meta to zielona platforma 24x24 z bonusem 100 monet.",
+		designDoc = "## Koncept\nNeon Skyway Obby to klasyk gatunku obby w wersji \"neonowej\": ciemne tło, jaskrawe platformy, \nproceduralny tor, który za każdym razem wygląda inaczej (bo seed zmieniasz jednym numerem), ale jest sprawiedliwy – \nwszystkie skoki są do policzenia z parametrów ruchu gracza.\n\n## Pętla rozgrywki\n1. Gracz spawnuje się w lobby i widzi tablicę z zasadami.\n2. Wchodzi na tor: skok, skok, ryzyko, śmierć lub postęp.\n3. Checkpoint co 6 etapów daje satysfakcjonujące \"zapisano\".\n4. Monety po drodze tworzą drugi, opcjonalny cel.\n5. Meta daje 100 monet i wpis w leaderstats.\n\n## Systemy\n| System | Rola | Parametry |\n| --- | --- | --- |\n| LevelBuilder | Generuje tor z seeda | 26 platform, gap 9-18 |\n| CheckpointService | Zapamiętuje etap gracza | co 6 platform |\n| Lawa | Kara za błąd | Y-6 pod platformami |\n| Monety | Waluta | 14 monet, respawn 12 s |\n| Ruchome platformy | Timing | co 5 platform |\n\n## Balans\nPrzy WalkSpeed 18 i JumpPower 52 gracz przeskakuje ~9-13 studsów w poziomie. Największa szczelina (18) \njest celowo na granicy – wymaga rozpędu, ale nie jest niemożliwa. Wysokość zmienia się maksymalnie o 2 studs na skok.\n\n## Mapa\nLiniowy tor wzdłuż osi Z, lobby na Z=0, meta około Z=450. Boczny rozrzut +/-7 studsów daje wrażenie swobody \nbez gubienia gracza. Światło: popołudniowe (ClockTime 15) + cienie (ShadowMap).\n\n## UI\nHUD w lewym górnym rogu: etap. Prawy górny: monety i timer. Dolny środek: toasty (checkpoint, meta, monety). \nCałe UI generowane w kodzie – zero plików graficznych, zero problemów z moderacją assetów.\n\n## Onboarding gracza\nTablica z 3 krokami (\"Skacz\", \"Zbieraj monety\", \"Dotrzyj do mety\"), spawn na wygodnej platformie 12x12, \npierwsze 4 platformy są szerokie i płaskie, trudność rośnie dopiero od 5. etapu.\n\n## Ryzyka\n* Gracz utknie między platformami → przycisk R (reset) i checkpoint co 6 etapów.\n* Zbyt duże szczeliny → wszystkie limity w Config: GapMin/GapMax do zmiany bez czytania logiki.\n* Spadki FPS od lawy → lawa to proste Part-y z Materiałem Neon, bez cząstek na każdej platformie.",
+	},
+	plan = {
+		architecture = "Serwer jest autorytetem: buduje tor (LevelBuilder), pilnuje postępu (CheckpointService), trzyma walutę i leaderstats (Stats).\nKlient (HUD, Effects) nie modyfikuje stanu gry – wysyła tylko prośbę o reset przez RemoteEvent \"Reset\".\nSerwer wysyła komunikaty UI przez RemoteEvent \"Notify\" (tekst + kolor), które HUD pokazuje jako toast.\nConfig w ReplicatedStorage.Shared jest wspólny: te same kolory, te same nazwy remotów po obu stronach.",
+		remoteEvents = {
+			{
+				name = "Notify",
+				direction = "server->client",
+				payload = "message: string, color: Color3?",
+			},
+			{
+				name = "Reset",
+				direction = "client->server",
+				payload = "(brak) – prośba o respawn postaci",
+			},
+		},
+		files = {
+			{
+				path = "src/shared/Config.luau",
+				kind = "module",
+				purpose = "Liczby balansu, kolory, nazwy remotów",
+				exports = {
+					"Config",
+				},
+				requires = {},
+				lines = 45,
+			},
+			{
+				path = "src/server/CheckpointService.luau",
+				kind = "module",
+				purpose = "Postęp gracza i RespawnLocation",
+				exports = {
+					"CheckpointService",
+				},
+				requires = {
+					"src/shared/Config.luau",
+				},
+				lines = 70,
+			},
+			{
+				path = "src/server/LevelBuilder.server.luau",
+				kind = "server",
+				purpose = "Proceduralna budowa toru",
+				exports = {},
+				requires = {
+					"src/shared/Config.luau",
+					"src/server/CheckpointService.luau",
+				},
+				lines = 200,
+			},
+			{
+				path = "src/server/Stats.server.luau",
+				kind = "server",
+				purpose = "leaderstats, statystyki postaci, monety, remotes",
+				exports = {},
+				requires = {
+					"src/shared/Config.luau",
+					"src/server/CheckpointService.luau",
+				},
+				lines = 110,
+			},
+			{
+				path = "src/client/Hud.client.luau",
+				kind = "client",
+				purpose = "HUD: etap, monety, timer, toasty",
+				exports = {},
+				requires = {
+					"src/shared/Config.luau",
+				},
+				lines = 170,
+			},
+			{
+				path = "src/client/Effects.client.luau",
+				kind = "client",
+				purpose = "FOV, efekt śmierci, wstrząs kamery",
+				exports = {},
+				requires = {},
+				lines = 90,
+			},
 		},
 	},
 	world = {
@@ -224,12 +433,31 @@ local PROJECT = {
 	},
 }
 
--- ==================================================================
---  Część wykonawcza wtyczki: buduje grę w otwartym miejscu.
--- ==================================================================
+local PROJECT_CONFIG = {
+	serverUrl = "http://127.0.0.1:5173",
+	language = "pl",
+	model = {
+		provider = "",
+		model = "",
+		apiKey = "",
+		baseUrl = "",
+	},
+}
+
+
+--==================================================================
+--  SILNIK: budowanie projektu, serializacja, HTTP, placeholdery
+--==================================================================
+local HttpService = game:GetService("HttpService")
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local Selection = game:GetService("Selection")
 local Lighting = game:GetService("Lighting")
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+
+local SERVER_URL = PROJECT_CONFIG.serverUrl
+local PROJECT_FOLDER_NAME = PROJECT.name
+local HIDDEN_ROOT = "__AIGame_" .. PROJECT_FOLDER_NAME
 
 local SERVICES = {
 	server = "ServerScriptService",
@@ -261,6 +489,17 @@ local ENUMS = {
 	RightSurface = Enum.SurfaceType,
 }
 
+local function log(message)
+	print("[AI Builder] " .. tostring(message))
+end
+
+local function warnOnce(message)
+	warn("[AI Builder] " .. tostring(message))
+end
+
+-- ---------------------------------------------------------------- --
+--  Konwersje właściwości (identyczne z eksportem .rbxmx)
+-- ---------------------------------------------------------------- --
 local function hexToColor3(hex)
 	local cleaned = string.gsub(string.upper(tostring(hex)), "#", "")
 	if #cleaned ~= 6 then
@@ -276,7 +515,6 @@ local function isHex(value)
 	return type(value) == "string" and string.match(value, "^#?%x%x%x%x%x%x$") ~= nil
 end
 
--- Ustawia właściwość instancji niezależnie od tego, jak zapisał ją generator.
 local function applyProperty(instance, key, value)
 	local enum = ENUMS[key]
 	if enum and type(value) == "string" then
@@ -291,25 +529,34 @@ local function applyProperty(instance, key, value)
 		end
 	end
 
-	if key == "CFrame" then
-		if type(value) == "table" then
-			local position = value.position or value.Position or { 0, 0, 0 }
-			local rotation = value.rotation or { 0, 0, 0 }
-			local pos = Vector3.new(position[1] or 0, position[2] or 0, position[3] or 0)
-			local ok = pcall(function()
-				instance.CFrame = CFrame.new(pos) * CFrame.Angles(
-					math.rad(rotation[1] or 0), math.rad(rotation[2] or 0), math.rad(rotation[3] or 0)
-				)
-			end)
-			if ok then
-				return
-			end
+	if key == "CFrame" and type(value) == "table" then
+		local position = value.position or value.Position or { 0, 0, 0 }
+		local rotation = value.rotation or { 0, 0, 0 }
+		local ok = pcall(function()
+			instance.CFrame = CFrame.new(Vector3.new(position[1] or 0, position[2] or 0, position[3] or 0))
+				* CFrame.Angles(math.rad(rotation[1] or 0), math.rad(rotation[2] or 0), math.rad(rotation[3] or 0))
+		end)
+		if ok then
+			return
 		end
 	end
 
 	if type(value) == "table" then
-		if #value == 3 and (isHex(value[1]) or type(value[1]) == "number") then
-			if isHex(value[1]) or (value[1] <= 1 and value[2] <= 1 and value[3] <= 1 and (value[1] % 1 ~= 0)) then
+		if #value == 4 and string.match(key, "^UDim2?") then
+			pcall(function()
+				instance[key] = UDim2.new(value[1], value[2], value[3], value[4])
+			end)
+			return
+		end
+		if key == "NumberRange" and #value == 2 then
+			pcall(function()
+				instance[key] = NumberRange.new(value[1], value[2])
+			end)
+			return
+		end
+		if #value == 3 then
+			local isColour = isHex(value[1]) or (#value == 3 and value[1] <= 1 and value[2] <= 1 and value[3] <= 1 and value[1] % 1 ~= 0)
+			if isColour then
 				pcall(function()
 					instance[key] = Color3.new(value[1], value[2], value[3])
 				end)
@@ -320,21 +567,9 @@ local function applyProperty(instance, key, value)
 			end
 			return
 		end
-		if key == "NumberRange" and #value == 2 then
-			pcall(function()
-				instance[key] = NumberRange.new(value[1], value[2])
-			end)
-			return
-		end
-		if #value == 4 and string.match(key, "^UDim2?") then
-			pcall(function()
-				instance[key] = UDim2.new(value[1], value[2], value[3], value[4])
-			end)
-			return
-		end
 	end
 
-	if type(value) == "string" and isHex(value) then
+	if isHex(value) and key ~= "Name" then
 		pcall(function()
 			instance[key] = hexToColor3(value)
 		end)
@@ -346,56 +581,65 @@ local function applyProperty(instance, key, value)
 	end)
 end
 
-local function buildNode(parent, node, counters, log)
+-- ---------------------------------------------------------------- --
+--  Budowanie
+-- ---------------------------------------------------------------- --
+local function folderAt(parent, name)
+	local existing = parent:FindFirstChild(name)
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = name
+	folder.Parent = parent
+	return folder
+end
+
+local function buildNode(parent, node, counters)
 	if type(node) ~= "table" then
 		return nil
 	end
-
 	local className = node.className or "Folder"
 	local ok, instance = pcall(Instance.new, className)
 	if not ok or not instance then
-		log("Pominięto nieznaną klasę: " .. tostring(className))
-		counters.skipped += 1
+		counters.skipped = counters.skipped + 1
 		return nil
 	end
-
-	instance.Name = node.name or className
+	pcall(function()
+		instance.Name = node.name or className
+	end)
 	for key, value in pairs(node.properties or {}) do
 		if key ~= "Name" then
 			applyProperty(instance, key, value)
 		end
 	end
 	if node.source then
-		local sourceOk = pcall(function()
+		pcall(function()
 			instance.Source = node.source
 		end)
-		if not sourceOk then
-			log("Nie udało się ustawić kodu (brak uprawnień): " .. instance.Name)
-		end
 	end
-
 	instance.Parent = parent
-	counters.nodes += 1
-
+	counters.nodes = counters.nodes + 1
 	for _, child in ipairs(node.children or {}) do
-		buildNode(instance, child, counters, log)
+		buildNode(instance, child, counters)
 	end
 	return instance
 end
 
---- Zamienia listę plików Luau (Rojo) na skrypty w odpowiednich usługach.
-local function buildScripts(root, files, counters, log)
-	local function folderAt(parent, name)
-		local existing = parent:FindFirstChild(name)
-		if existing and existing:IsA("Folder") then
-			return existing
-		end
-		local folder = Instance.new("Folder")
-		folder.Name = name
-		folder.Parent = parent
-		return folder
+local function scriptClassFor(fileName, bucket)
+	if string.match(fileName, "%.server%.luau?$") then
+		return "Script"
 	end
+	if string.match(fileName, "%.client%.luau?$") then
+		return "LocalScript"
+	end
+	if bucket == "client" then
+		return "ModuleScript"
+	end
+	return "ModuleScript"
+end
 
+local function buildScripts(files, counters)
 	for _, file in ipairs(files) do
 		local parts = {}
 		for segment in string.gmatch(file.path, "[^/]+") do
@@ -404,110 +648,777 @@ local function buildScripts(root, files, counters, log)
 		if parts[1] == "src" then
 			table.remove(parts, 1)
 		end
-
 		local fileName = table.remove(parts) or "Script"
+		if string.match(fileName, "%.md$") then
+			continue
+		end
 		local bucket = string.lower(table.remove(parts) or "")
 		local serviceName = SERVICES[bucket] or "ServerStorage"
 		local service = game:GetService(serviceName)
-
 		local container = service
+
 		if bucket == "client" then
 			container = service:FindFirstChild("StarterPlayerScripts") or service
 		elseif bucket == "shared" then
 			container = folderAt(service, "Shared")
-		elseif bucket == "server" then
-			container = service
 		end
-
 		for _, segment in ipairs(parts) do
 			container = folderAt(container, segment)
 		end
 
-		-- Ta sama reguła co w eksporcie .rbxmx:
-		--   *.server.luau -> Script, *.client.luau -> LocalScript, reszta -> ModuleScript
-		local isServerScript = string.match(fileName, "%.server%.luau?$") ~= nil
-		local isClientScript = string.match(fileName, "%.client%.luau?$") ~= nil
+		local className = scriptClassFor(fileName, bucket)
+		local instanceName = string.gsub(string.gsub(string.gsub(fileName, "%.luau$", ""), "%.lua$", ""), "%.server$", "")
+		instanceName = string.gsub(instanceName, "%.client$", "")
 
-		local instanceName = string.gsub(string.gsub(fileName, "%.luau$", ""), "%.lua$", "")
-		instanceName = string.gsub(string.gsub(instanceName, "%.server$", ""), "%.client$", "")
-
-		local className = "ModuleScript"
-		if isServerScript then
-			className = "Script"
-		elseif isClientScript then
-			className = "LocalScript"
-		end
-
-		local script = Instance.new(className)
-		script.Name = instanceName
+		local script_ = Instance.new(className)
+		script_.Name = instanceName
 		local ok = pcall(function()
-			script.Source = file.content
+			script_.Source = file.content
 		end)
 		if not ok then
-			log("Nie udało się zapisać kodu: " .. file.path)
+			warnOnce("Nie udało się zapisać kodu: " .. file.path)
 		end
-		script.Parent = container
-		counters.scripts += 1
+		script_.Parent = container
+		counters.scripts = counters.scripts + 1
 	end
 end
 
---- Buduje całą grę w otwartym miejscu (idempotentnie: nadpisuje poprzedni folder).
-local function buildGame(log)
-	local counters = { nodes = 0, scripts = 0, skipped = 0 }
+local function buildProject(payload, counters)
 	local recording = ChangeHistoryService:TryBeginRecording("Roblox AI Game Builder")
 
-	local existing = workspace:FindFirstChild(PROJECT.name)
+	local existing = workspace:FindFirstChild(PROJECT_FOLDER_NAME)
 	if existing then
 		existing:Destroy()
 	end
+	local hidden = ServerStorage:FindFirstChild(HIDDEN_ROOT)
+	if hidden then
+		hidden:Destroy()
+	end
 
 	local root = Instance.new("Folder")
-	root.Name = PROJECT.name
+	root.Name = PROJECT_FOLDER_NAME
 	root.Parent = workspace
 
-	if PROJECT.world then
-		buildNode(root, PROJECT.world, counters, log)
+	if payload.world then
+		buildNode(root, payload.world, counters)
 	end
-	for key, value in pairs(PROJECT.lighting or {}) do
+	for key, value in pairs(payload.lighting or {}) do
 		applyProperty(Lighting, key, value)
 	end
-
-	buildScripts(root, PROJECT.files, counters, log)
+	buildScripts(payload.files or {}, counters)
 
 	if recording then
 		ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
 	end
-
-	log(string.format("Gotowe: %d instancji, %d skryptów.", counters.nodes, counters.scripts))
 	return root
 end
 
--- ==================================================================
---  Interfejs wtyczki
--- ==================================================================
-local toolbar = plugin:CreateToolbar("Roblox AI Game Builder")
-local buildButton = toolbar:CreateButton("Buduj grę", "Buduje wygenerowaną grę w tym miejscu", "rbxasset://textures/AnimationEditor/icon_play.png")
-local selectButton = toolbar:CreateButton("Zaznacz folder", "Zaznacza folder gry", "rbxasset://textures/AnimationEditor/icon_pause.png")
-
-local function log(message)
-	print("[RobloxAIGameBuilder] " .. message)
+-- ---------------------------------------------------------------- --
+--  Serializacja otwartego miejsca (dla "poproś o zmianę")
+-- ---------------------------------------------------------------- --
+local function serializeInstance(instance, depth)
+	if depth > 6 then
+		return nil
+	end
+	local node = {
+		className = instance.ClassName,
+		name = instance.Name,
+		properties = {},
+		children = {},
+	}
+	if instance:IsA("BasePart") then
+		node.properties.Size = { instance.Size.X, instance.Size.Y, instance.Size.Z }
+		node.properties.Position = { instance.Position.X, instance.Position.Y, instance.Position.Z }
+		node.properties.Orientation = { instance.Orientation.X, instance.Orientation.Y, instance.Orientation.Z }
+		node.properties.Anchored = instance.Anchored
+		node.properties.CanCollide = instance.CanCollide
+		node.properties.Color = string.format("#%02X%02X%02X",
+			math.floor(instance.Color.R * 255), math.floor(instance.Color.G * 255), math.floor(instance.Color.B * 255))
+		node.properties.Material = instance.Material.Name
+		node.properties.Transparency = instance.Transparency
+	elseif instance:IsA("SpawnLocation") then
+		node.properties.Duration = instance.Duration
+	elseif instance:IsA("PointLight") or instance:IsA("SpotLight") then
+		node.properties.Brightness = instance.Brightness
+		node.properties.Range = instance.Range
+		node.properties.Color = string.format("#%02X%02X%02X",
+			math.floor(instance.Color.R * 255), math.floor(instance.Color.G * 255), math.floor(instance.Color.B * 255))
+	elseif instance:IsA("TextLabel") or instance:IsA("TextButton") then
+		node.properties.Text = instance.Text
+		node.properties.TextScaled = instance.TextScaled
+		node.properties.Font = instance.Font.Name
+	end
+	for _, child in ipairs(instance:GetChildren()) do
+		if child:IsA("LuaSourceContainer") then
+			continue
+		end
+		local serialized = serializeInstance(child, depth + 1)
+		if serialized then
+			table.insert(node.children, serialized)
+		end
+	end
+	if #node.children == 0 then
+		node.children = nil
+	end
+	return node
 end
 
-buildButton.Click:Connect(function()
-	local root = buildGame(log)
+local function findProjectRoot()
+	local root = workspace:FindFirstChild(PROJECT_FOLDER_NAME)
 	if root then
-		Selection:Set({ root })
-		log("Folder gry: " .. root.Name .. " (skrypty są już w usługach)")
+		return root
 	end
-end)
+	return nil
+end
 
-selectButton.Click:Connect(function()
-	local root = workspace:FindFirstChild(PROJECT.name)
+local function collectFiles(root)
+	local files = {}
+	if not root then
+		return files
+	end
+	for _, serviceName in ipairs({ "ServerScriptService", "ReplicatedStorage", "StarterPlayer", "StarterGui", "ServerStorage" }) do
+		local service = game:GetService(serviceName)
+		local ok = pcall(function()
+			for _, descendant in ipairs(service:GetDescendants()) do
+				if descendant:IsA("LuaSourceContainer") and descendant.Source ~= "" then
+					table.insert(files, { path = "src/" .. serviceName .. "/" .. descendant.Name .. ".luau", content = descendant.Source })
+				end
+			end
+		end)
+		if not ok then
+			-- ServerStorage/ServerScriptService są dostępne w Studio, więc to nie powinno się zdarzyć
+		end
+	end
+	return files
+end
+
+local function projectPayloadForRefine()
+	local root = findProjectRoot()
+	local files = PROJEKT_FILES()
+	if root then
+		local liveFiles = collectFiles(root)
+		if #liveFiles > #files then
+			files = liveFiles
+		end
+	end
+	return {
+		name = PROJECT.name,
+		summary = PROJECT.summary or "",
+		genre = PROJECT.genre or "",
+		design = PROJECT.design,
+		plan = PROJECT.plan,
+		notes = PROJECT.notes or {},
+		files = files,
+		world = PROJECT.world and { world = PROJECT.world, lighting = PROJECT.lighting or {} } or nil,
+	}
+end
+
+function PROJEKT_FILES()
+	local files = {}
+	for _, file in ipairs(PROJECT.files or {}) do
+		table.insert(files, { path = file.path, content = file.content })
+	end
+	return files
+end
+
+-- ---------------------------------------------------------------- --
+--  HTTP
+-- ---------------------------------------------------------------- --
+local function httpEnabled()
+	local ok, enabled = pcall(function()
+		return HttpService.HttpEnabled
+	end)
+	return ok and enabled
+end
+
+local function request(method, path, body)
+	if not httpEnabled() then
+		return nil, "HttpService jest wyłączony. Włącz: Game Settings → Security → Allow HTTP Requests."
+	end
+	local options = {
+		Url = SERVER_URL .. path,
+		Method = method,
+		Headers = { ["Content-Type"] = "application/json" },
+	}
+	if body ~= nil then
+		options.Body = HttpService:JSONEncode(body)
+	end
+	local ok, response = pcall(function()
+		return HttpService:RequestAsync(options)
+	end)
+	if not ok then
+		return nil, "Nie mogę połączyć się z lokalnym builderem (" .. SERVER_URL .. "). Uruchom: npm start"
+	end
+	if not response.Success then
+		local detail = response.Body
+		local okDecode, decoded = pcall(HttpService.JSONDecode, HttpService, response.Body)
+		if okDecode and decoded and decoded.error then
+			detail = decoded.error
+		end
+		return nil, "Serwer odpowiedział " .. tostring(response.StatusCode) .. ": " .. tostring(detail)
+	end
+	local okDecode, decoded = pcall(HttpService.JSONDecode, HttpService, response.Body)
+	if not okDecode then
+		return nil, "Nie mogę odczytać odpowiedzi serwera."
+	end
+	return decoded, nil
+end
+
+local function serverAlive()
+	local health = request("GET", "/api/health", nil)
+	return health ~= nil
+end
+
+local function pollJob(jobId, onProgress, isCancelled)
+	local lastMessage = ""
+	while true do
+		if isCancelled and isCancelled() then
+			request("POST", "/api/jobs/" .. jobId .. "/cancel", {})
+			return nil, "Anulowano."
+		end
+		local snapshot, err = request("GET", "/api/jobs/" .. jobId, nil)
+		if not snapshot then
+			return nil, err
+		end
+		if snapshot.message ~= lastMessage or true then
+			lastMessage = snapshot.message or ""
+			if onProgress then
+				onProgress(snapshot.progress or 0, lastMessage, snapshot)
+			end
+		end
+		if snapshot.status == "done" then
+			return snapshot.project, nil
+		elseif snapshot.status == "error" then
+			return nil, snapshot.error or "Generowanie nie udało się."
+		elseif snapshot.status == "cancelled" then
+			return nil, "Anulowano."
+		end
+		task.wait(0.8)
+	end
+end
+
+-- ---------------------------------------------------------------- --
+--  Placeholdery assetów + darmowe zamienniki
+-- ---------------------------------------------------------------- --
+local ASSET_FIELDS = {
+	{ className = "Decal", property = "Texture", label = "Decal" },
+	{ className = "ImageLabel", property = "Image", label = "Obraz w GUI" },
+	{ className = "ImageButton", property = "Image", label = "Przycisk GUI" },
+	{ className = "Texture", property = "Texture", label = "Tekstura" },
+	{ className = "Sound", property = "SoundId", label = "Dźwięk" },
+	{ className = "MeshPart", property = "MeshId", label = "Siatka 3D" },
+	{ className = "SpecialMesh", property = "MeshId", label = "Siatka 3D" },
+	{ className = "Animation", property = "AnimationId", label = "Animacja" },
+	{ className = "ParticleEmitter", property = "Texture", label = "Cząstki" },
+	{ className = "Beam", property = "Texture", label = "Wiązka" },
+	{ className = "Trail", property = "Texture", label = "Ślad" },
+}
+
+local FREE_ASSETS = {
+	{
+		label = "Dźwięk: klik/UI",
+		className = "Sound",
+		property = "SoundId",
+		id = "rbxassetid://9114221322",
+		note = "Krótki beep – do przycisków i HUD",
+	},
+	{
+		label = "Dźwięk: moneta",
+		className = "Sound",
+		property = "SoundId",
+		id = "rbxassetid://9114222000",
+		note = "Klasyczny dźwięk nagrody",
+	},
+	{
+		label = "Dźwięk: eksplozja",
+		className = "Sound",
+		property = "SoundId",
+		id = "rbxassetid://9114238056",
+		note = "Do wybuchów i skoków",
+	},
+	{
+		label = "Dźwięk: kroki",
+		className = "Sound",
+		property = "SoundId",
+		id = "rbxassetid://9114422766",
+		note = "Pętla kroków postaci",
+	},
+	{
+		label = "Tekstura: siatka neonowa",
+		className = "Texture",
+		property = "Texture",
+		id = "rbxassetid://7529565370",
+		note = "Świecąca siatka – motyw neonowy",
+	},
+	{
+		label = "Tekstura: metalowa płyta",
+		className = "Texture",
+		property = "Texture",
+		id = "rbxassetid://6560377203",
+		note = "Powierzchnia przemysłowa",
+	},
+}
+
+local function isPlaceholderValue(value)
+	if type(value) ~= "string" then
+		return false
+	end
+	local trimmed = string.gsub(value, "%s", "")
+	return trimmed == "" or trimmed == "rbxassetid://0" or trimmed == "rbxassetid://" or trimmed == "0"
+end
+
+--- Skanuje miejsce i zwraca listę propercji assetów bez wartości.
+local function findPlaceholders(limit)
+	limit = limit or 120
+	local found = {}
+	local scanned = 0
+	for _, serviceName in ipairs({ "Workspace", "ReplicatedStorage", "StarterGui", "StarterPlayer", "ServerStorage", "SoundService" }) do
+		local service = game:GetService(serviceName)
+		local ok, descendants = pcall(function()
+			return service:GetDescendants()
+		end)
+		if ok then
+			for _, instance in ipairs(descendants) do
+				scanned = scanned + 1
+				for _, field in ipairs(ASSET_FIELDS) do
+					if instance:IsA(field.className) then
+						local okValue, value = pcall(function()
+							return instance[field.property]
+						end)
+						if okValue and isPlaceholderValue(value) then
+							table.insert(found, {
+								instance = instance,
+								className = instance.ClassName,
+								property = field.property,
+								label = field.label,
+								path = instance:GetFullName(),
+							})
+							if #found >= limit then
+								return found, scanned
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	return found, scanned
+end
+
+local function insertFreeAsset(asset, parent)
+	local instance = Instance.new(asset.className)
+	instance.Name = string.gsub(asset.label, "[^%w]", "_")
+	pcall(function()
+		instance[asset.property] = asset.id
+	end)
+	if instance:IsA("Sound") then
+		pcall(function()
+			instance.Volume = 0.5
+			instance.RollOffMaxDistance = 120
+		end)
+	end
+	instance.Parent = parent or (findProjectRoot() or workspace)
+	return instance
+end
+
+-- ---------------------------------------------------------------- --
+--  Ikona gry
+-- ---------------------------------------------------------------- --
+local function saveIcon(projectId, name, genre)
+	local ok, body = pcall(function()
+		return HttpService:GetAsync(SERVER_URL .. "/api/thumbnail?project=" .. tostring(projectId or "")
+			.. "&name=" .. HttpService:UrlEncode(name or PROJECT.name)
+			.. "&genre=" .. HttpService:UrlEncode(genre or PROJECT.genre or ""), true)
+	end)
+	if not ok or type(body) ~= "string" or #body < 100 then
+		return nil, "Nie udało się pobrać ikony (sprawdź, czy lokalny builder działa)."
+	end
+	local fileName = string.gsub(PROJECT.name, "[^%w%-_]", "_") .. "-icon.png"
+	local writeOk = pcall(function()
+		writefile(fileName, body)
+	end)
+	if not writeOk then
+		return nil, "Nie mogę zapisać pliku w folderze wtyczek."
+	end
+	return fileName, nil
+end
+
+
+--==================================================================
+--  INTERFEJS: pasek narzędzi + dock widget z generatorem
+--==================================================================
+local toolbar = plugin:CreateToolbar("Roblox AI Game Builder")
+local buildButton = toolbar:CreateButton("Buduj grę", "Buduje wygenerowaną grę w tym miejscu", "rbxasset://textures/AnimationEditor/icon_play.png")
+local uiButton = toolbar:CreateButton("AI Builder", "Panel generatora: zmiany w grze, asset, ikona", "rbxasset://textures/AnimationEditor/icon_pause.png")
+
+local widgetInfo = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 400, 620, 340, 480)
+local widget = plugin:CreateDockWidgetPluginGui("RobloxAIGameBuilderPanel", widgetInfo)
+widget.Title = "Roblox AI Game Builder"
+
+local theme = {
+	bg = Color3.fromRGB(16, 19, 34),
+	panel = Color3.fromRGB(24, 28, 48),
+	line = Color3.fromRGB(66, 74, 116),
+	text = Color3.fromRGB(232, 236, 255),
+	muted = Color3.fromRGB(154, 163, 199),
+	accent = Color3.fromRGB(0, 229, 160),
+	warn = Color3.fromRGB(255, 196, 0),
+	err = Color3.fromRGB(255, 82, 82),
+}
+
+local function corner(parent, radius)
+	local instance = Instance.new("UICorner")
+	instance.CornerRadius = UDim.new(0, radius or 8)
+	instance.Parent = parent
+	return instance
+end
+
+local function makeFrame(parent, size, position, colour, transparency)
+	local frame = Instance.new("Frame")
+	frame.Size = size
+	frame.Position = position
+	frame.BackgroundColor3 = colour or theme.panel
+	frame.BackgroundTransparency = transparency or 0
+	frame.BorderSizePixel = 0
+	frame.Parent = parent
+	corner(frame, 8)
+	return frame
+end
+
+local function makeLabel(parent, text, size, position, colour, bold)
+	local label = Instance.new("TextLabel")
+	label.Size = size
+	label.Position = position
+	label.BackgroundTransparency = 1
+	label.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+	label.Text = text
+	label.TextColor3 = colour or theme.text
+	label.TextSize = 13
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextWrapped = true
+	label.Parent = parent
+	return label
+end
+
+local function makeButton(parent, text, size, position, primary)
+	local button = Instance.new("TextButton")
+	button.Size = size
+	button.Position = position
+	button.BackgroundColor3 = primary and theme.accent or Color3.fromRGB(40, 46, 74)
+	button.BorderSizePixel = 0
+	button.Font = Enum.Font.GothamBold
+	button.Text = text
+	button.TextSize = 13
+	button.TextColor3 = primary and Color3.fromRGB(6, 18, 14) or theme.text
+	button.AutoButtonColor = true
+	button.Parent = parent
+	corner(button, 7)
+	return button
+end
+
+local scroll = Instance.new("ScrollingFrame")
+scroll.Size = UDim2.fromScale(1, 1)
+scroll.BackgroundColor3 = theme.bg
+scroll.BorderSizePixel = 0
+scroll.ScrollBarThickness = 6
+scroll.CanvasSize = UDim2.new(0, 0, 0, 940)
+scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scroll.Parent = widget
+
+local pad = Instance.new("Frame")
+pad.Size = UDim2.new(1, -20, 0, 0)
+pad.Position = UDim2.fromOffset(10, 10)
+pad.BackgroundTransparency = 1
+pad.Parent = scroll
+
+-- Nagłówek --------------------------------------------------------
+local header = makeFrame(pad, UDim2.new(1, 0, 0, 72), UDim2.fromOffset(0, 0), theme.panel)
+makeLabel(header, PROJECT.name, UDim2.new(1, -20, 0, 22), UDim2.fromOffset(12, 8), theme.accent, true)
+makeLabel(header, (PROJECT.tagline or PROJECT.summary or ""), UDim2.new(1, -20, 0, 34), UDim2.fromOffset(12, 32), theme.muted)
+
+-- Sekcja 1: budowanie ---------------------------------------------
+local sectionBuild = makeFrame(pad, UDim2.new(1, 0, 0, 116), UDim2.fromOffset(0, 80), theme.panel)
+makeLabel(sectionBuild, "1. ZBUDUJ / PRZEBUDUJ GRĘ", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
+local buildBtn = makeButton(sectionBuild, "Buduj grę w tym miejscu", UDim2.new(1, -24, 0, 34), UDim2.fromOffset(12, 28), true)
+local selectBtn = makeButton(sectionBuild, "Zaznacz folder gry", UDim2.new(0.5, -16, 0, 28), UDim2.fromOffset(12, 68), false)
+local undoBtn = makeButton(sectionBuild, "Cofnij budowanie (Ctrl+Z)", UDim2.new(0.5, -16, 0, 28), UDim2.fromOffset(24 + 158, 68), false)
+local buildStatus = makeLabel(sectionBuild, "Skrypty: " .. tostring(#(PROJECT.files or {})) .. " · mapa: gotowa do zbudowania", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 98), theme.muted)
+
+-- Sekcja 2: zmiany przez AI ---------------------------------------
+local sectionRefine = makeFrame(pad, UDim2.new(1, 0, 0, 176), UDim2.fromOffset(0, 204), theme.panel)
+makeLabel(sectionRefine, "2. POPROŚ O ZMIANĘ (AI)", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
+local refineBox = Instance.new("TextBox")
+refineBox.Size = UDim2.new(1, -24, 0, 62)
+refineBox.Position = UDim2.fromOffset(12, 28)
+refineBox.BackgroundColor3 = Color3.fromRGB(12, 15, 28)
+refineBox.BorderSizePixel = 0
+refineBox.Font = Enum.Font.Gotham
+refineBox.TextSize = 12
+refineBox.TextColor3 = theme.text
+refineBox.PlaceholderText = "np. dodaj sklep z ulepszeniami i ranking graczy"
+refineBox.TextXAlignment = Enum.TextXAlignment.Left
+refineBox.TextYAlignment = Enum.TextYAlignment.Top
+refineBox.TextWrapped = true
+refineBox.ClearTextOnFocus = false
+refineBox.Parent = sectionRefine
+corner(refineBox, 7)
+
+local refineBtn = makeButton(sectionRefine, "Zastosuj zmianę", UDim2.new(0.62, -18, 0, 32), UDim2.fromOffset(12, 98), true)
+local refineFullBtn = makeButton(sectionRefine, "Tylko kod", UDim2.new(0.38, -18, 0, 32), UDim2.fromOffset(190, 98), false)
+local refineStatus = makeLabel(sectionRefine, "Zmiana wymaga działającego lokalnego buildera (npm start).", UDim2.new(1, -20, 0, 34), UDim2.fromOffset(12, 136), theme.muted)
+
+-- Sekcja 3: postęp ------------------------------------------------
+local sectionProgress = makeFrame(pad, UDim2.new(1, 0, 0, 74), UDim2.fromOffset(0, 388), theme.panel)
+local progressBar = makeFrame(sectionProgress, UDim2.new(1, -24, 0, 10), UDim2.fromOffset(12, 14), Color3.fromRGB(12, 15, 28))
+local progressFill = Instance.new("Frame")
+progressFill.Size = UDim2.fromScale(0, 1)
+progressFill.BackgroundColor3 = theme.accent
+progressFill.BorderSizePixel = 0
+progressFill.Parent = progressBar
+corner(progressFill, 5)
+local progressLabel = makeLabel(sectionProgress, "Gotowe do pracy.", UDim2.new(1, -120, 0, 40), UDim2.fromOffset(12, 30), theme.muted)
+local cancelBtn = makeButton(sectionProgress, "Przerwij", UDim2.new(0, 96, 0, 26), UDim2.new(1, -108, 0, 32), false)
+cancelBtn.Visible = false
+
+-- Sekcja 4: assety i zaślepki -------------------------------------
+local sectionAssets = makeFrame(pad, UDim2.new(1, 0, 0, 250), UDim2.fromOffset(0, 470), theme.panel)
+makeLabel(sectionAssets, "3. ZAŚLEPKI ASSETÓW", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
+local scanBtn = makeButton(sectionAssets, "Znajdź brakujące assety", UDim2.new(1, -24, 0, 30), UDim2.fromOffset(12, 28), false)
+local assetList = Instance.new("ScrollingFrame")
+assetList.Size = UDim2.new(1, -24, 0, 96)
+assetList.Position = UDim2.fromOffset(12, 64)
+assetList.BackgroundColor3 = Color3.fromRGB(12, 15, 28)
+assetList.BorderSizePixel = 0
+assetList.ScrollBarThickness = 4
+assetList.CanvasSize = UDim2.new(0, 0, 0, 0)
+assetList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+assetList.Parent = sectionAssets
+corner(assetList, 7)
+local assetListLayout = Instance.new("UIListLayout")
+assetListLayout.Padding = UDim.new(0, 4)
+assetListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+assetListLayout.Parent = assetList
+local assetHint = makeLabel(sectionAssets, "Kliknij, aby znaleźć Decal/Sound/Mesh bez wartości (zaślepki po AI i importach).", UDim2.new(1, -20, 0, 30), UDim2.fromOffset(12, 166), theme.muted)
+
+-- Sekcja 5: darmowe assety + ikona ---------------------------------
+local sectionFree = makeFrame(pad, UDim2.new(1, 0, 0, 196), UDim2.fromOffset(0, 730), theme.panel)
+makeLabel(sectionFree, "4. DARMOWE ASSETY I IKONA", UDim2.new(1, -20, 0, 16), UDim2.fromOffset(12, 8), theme.muted, true)
+local freeButtons = {}
+for index, asset in ipairs(FREE_ASSETS) do
+	local column = (index - 1) % 2
+	local row = math.floor((index - 1) / 2)
+	local button = makeButton(sectionFree, asset.label, UDim2.new(0.5, -18, 0, 28), UDim2.fromOffset(12 + column * 190, 30 + row * 34), false)
+	button.TextSize = 11
+	button.MouseButton1Click:Connect(function()
+		local inserted = insertFreeAsset(asset, Selection:Get()[1])
+		Selection:Set({ inserted })
+		progressLabel.Text = "Wstawiono: " .. asset.label .. " (" .. asset.note .. ")"
+	end)
+	table.insert(freeButtons, button)
+end
+local iconBtn = makeButton(sectionFree, "Zapisz ikonę gry (PNG 512x512)", UDim2.new(1, -24, 0, 30), UDim2.fromOffset(12, 136), true)
+local iconHint = makeLabel(sectionFree, "Ikona trafi do folderu wtyczek – wgraj ją na create.roblox.com.", UDim2.new(1, -20, 0, 28), UDim2.fromOffset(12, 170), theme.muted)
+
+--==================================================================
+--  Logika interfejsu
+--==================================================================
+local busy = false
+local cancelRequested = false
+
+local function setProgress(value, message)
+	progressFill.Size = UDim2.fromScale(math.clamp(value, 0, 1), 1)
+	if message then
+		progressLabel.Text = message
+		progressLabel.TextColor3 = theme.muted
+	end
+end
+
+local function startBusy(message)
+	busy = true
+	cancelRequested = false
+	cancelBtn.Visible = true
+	buildBtn.Active = false
+	refineBtn.Active = false
+	setProgress(0.02, message)
+end
+
+local function stopBusy(message, colour)
+	busy = false
+	cancelBtn.Visible = false
+	buildBtn.Active = true
+	refineBtn.Active = true
+	if message then
+		progressLabel.Text = message
+		progressLabel.TextColor3 = colour or theme.muted
+	end
+end
+
+local function doBuild()
+	if busy then
+		return
+	end
+	local counters = { nodes = 0, scripts = 0, skipped = 0 }
+	local ok, err = pcall(function()
+		local root = buildProject({ world = PROJECT.world, lighting = PROJECT.lighting, files = PROJECT.files }, counters)
+		Selection:Set({ root })
+	end)
+	if not ok then
+		stopBusy("Budowanie nie udało się: " .. tostring(err), theme.err)
+		warnOnce(err)
+		return
+	end
+	local message = string.format("Zbudowano: %d instancji, %d skryptów%s.", counters.nodes, counters.scripts,
+		counters.skipped > 0 and (", pominięto " .. counters.skipped) or "")
+	buildStatus.Text = message
+	stopBusy(message, theme.accent)
+	log(message)
+end
+
+local function doRefine()
+	if busy then
+		return
+	end
+	local instruction = refineBox.Text
+	if string.gsub(instruction, "%s", "") == "" then
+		stopBusy("Opisz zmianę, np. \"dodaj sklep i ranking\".", theme.warn)
+		return
+	end
+	startBusy("Wysyłam projekt do lokalnego buildera...")
+	refineStatus.Text = "Pracuję..."
+
+	task.spawn(function()
+		-- Zawsze serializujemy aktualny stan: kod z miejsca (jeśli zbudowane) + mapa projektu.
+		local payload = projectPayloadForRefine()
+		local response, err = request("POST", "/api/refine", {
+			jobId = "plugin-" .. tostring(math.floor(os.clock() * 1000)),
+			project = payload,
+			instruction = instruction,
+			config = PROJECT_CONFIG.model,
+			options = { language = PROJECT_CONFIG.language or "pl" },
+		})
+		if not response then
+			stopBusy("Błąd: " .. tostring(err), theme.err)
+			refineStatus.Text = tostring(err)
+			return
+		end
+		local project, jobError = pollJob(response.jobId, function(progress, message)
+			setProgress(progress, message)
+		end, function()
+			return cancelRequested
+		end)
+		if not project then
+			stopBusy("Nie udało się: " .. tostring(jobError), theme.err)
+			refineStatus.Text = tostring(jobError)
+			return
+		end
+
+		-- Zapisujemy nową wersję projektu i przebudowujemy miejsce.
+		PROJECT.files = {}
+		for _, file in ipairs(project.files or {}) do
+			table.insert(PROJECT.files, { path = file.path, content = file.content })
+		end
+		PROJECT.design = project.design or PROJECT.design
+		PROJECT.plan = project.plan or PROJECT.plan
+		PROJECT.name = project.name or PROJECT.name
+		PROJECT.projectId = project.projectId or PROJECT.projectId
+
+		local counters = { nodes = 0, scripts = 0, skipped = 0 }
+		buildProject({ world = PROJECT.world, lighting = PROJECT.lighting, files = PROJECT.files }, counters)
+		setProgress(1, "Zmiana zastosowana.")
+		refineStatus.Text = project.summary or (project.notes and project.notes[#project.notes]) or "Gotowe."
+		stopBusy("Zmiana zastosowana i zbudowana w miejscu.", theme.accent)
+		refineBox.Text = ""
+	end)
+end
+
+local function doScan()
+	local placeholders, scanned = findPlaceholders(120)
+	for _, child in ipairs(assetList:GetChildren()) do
+		if child:IsA("TextButton") then
+			child:Destroy()
+		end
+	end
+	if #placeholders == 0 then
+		assetHint.Text = string.format("Przeskanowano %d instancji – brak zaślepek. Świetnie!", scanned)
+		return
+	end
+	assetHint.Text = string.format("Znaleziono %d zaślepek (zeskanowano %d instancji).", #placeholders, scanned)
+	for index, item in ipairs(placeholders) do
+		local row = Instance.new("TextButton")
+		row.Size = UDim2.new(1, -8, 0, 26)
+		row.BackgroundColor3 = Color3.fromRGB(26, 31, 54)
+		row.BorderSizePixel = 0
+		row.Font = Enum.Font.Code
+		row.TextSize = 11
+		row.TextColor3 = theme.warn
+		row.TextXAlignment = Enum.TextXAlignment.Left
+		row.Text = "  " .. item.label .. ": " .. item.path .. "." .. item.property
+		row.LayoutOrder = index
+		row.Parent = assetList
+		corner(row, 6)
+		row.MouseButton1Click:Connect(function()
+			Selection:Set({ item.instance })
+			progressLabel.Text = "Wybrano " .. item.path
+		end)
+	end
+end
+
+-- Zdarzenia -------------------------------------------------------
+buildBtn.MouseButton1Click:Connect(doBuild)
+buildButton.Click:Connect(doBuild)
+undoBtn.MouseButton1Click:Connect(function()
+	local ok, err = pcall(function()
+		game:GetService("ChangeHistoryService"):Undo()
+	end)
+	stopBusy(ok and "Cofnięto ostatnią operację." or ("Nie można cofnąć: " .. tostring(err)), ok and theme.muted or theme.err)
+end)
+selectBtn.MouseButton1Click:Connect(function()
+	local root = findProjectRoot()
 	if root then
 		Selection:Set({ root })
 	else
-		log("Najpierw zbuduj grę.")
+		stopBusy("Najpierw zbuduj grę.", theme.warn)
+	end
+end)
+refineBtn.MouseButton1Click:Connect(function()
+	doRefine()
+end)
+refineFullBtn.MouseButton1Click:Connect(function()
+	doRefine()
+end)
+cancelBtn.MouseButton1Click:Connect(function()
+	cancelRequested = true
+	stopBusy("Anuluję...", theme.warn)
+end)
+scanBtn.MouseButton1Click:Connect(doScan)
+iconBtn.MouseButton1Click:Connect(function()
+	local ok, err = pcall(function()
+		local fileName, iconError = saveIcon(PROJECT.projectId, PROJECT.name, PROJECT.genre)
+		if not fileName then
+			stopBusy(iconError, theme.err)
+			return
+		end
+		stopBusy("Ikona zapisana: " .. fileName .. " (folder wtyczek). Wgraj ją na create.roblox.com.", theme.accent)
+		log("Ikona: " .. fileName)
+	end)
+	if not ok then
+		stopBusy("Błąd ikony: " .. tostring(err), theme.err)
+	end
+end)
+uiButton.Click:Connect(function()
+	widget.Enabled = not widget.Enabled
+end)
+
+-- Sprawdzenie połączenia z builderem ------------------------------
+task.spawn(function()
+	if serverAlive() then
+		progressLabel.Text = "Połączono z lokalnym builderem (" .. SERVER_URL .. ")."
+		refineStatus.Text = "Napisz, co zmienić – AI przepisze kod i zbuduje grę ponownie."
+	else
+		progressLabel.Text = "Brak połączenia z builderem – budowanie i assety działają offline."
+		progressLabel.TextColor3 = theme.warn
 	end
 end)
 
-log("Wtyczka gotowa. Gra: " .. PROJECT.name .. " (" .. tostring(#PROJECT.files) .. " plików Luau). Naciśnij \"Buduj grę\".");
+widget.Enabled = true
+log("Wtyczka gotowa. Gra: " .. PROJECT.name .. " (" .. tostring(#(PROJECT.files or {})) .. " plików Luau).")

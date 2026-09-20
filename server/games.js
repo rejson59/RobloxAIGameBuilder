@@ -5,8 +5,10 @@
 import obby from './demos/obby.js';
 import towerDefense from './demos/towerDefense.js';
 import arena from './demos/arena.js';
+import tycoon from './demos/tycoon.js';
+import horror from './demos/horror.js';
 
-export const DEMOS = [obby, towerDefense, arena];
+export const DEMOS = [obby, towerDefense, arena, tycoon, horror];
 
 export function listDemos() {
   return DEMOS.map((demo) => ({
@@ -35,6 +37,17 @@ export function getDemo(hint = 'obby') {
       if (needle.includes(haystack)) score += 3;
       for (const word of haystack.split(/[\s/,.-]+/)) {
         if (word.length > 3 && needle.includes(word)) score += 1;
+        // Polskie odmiany: "piekarni" ma trafić w "piekarnia" (porównujemy rdzeń).
+        else if (word.length > 5 && needle.includes(word.slice(0, 5))) score += 1;
+      }
+    }
+    for (const word of needle.split(/[\s,.;:!?()]+/)) {
+      if (word.length > 5) {
+        for (const haystack of haystacks) {
+          for (const candidate of haystack.split(/[\s/,.-]+/)) {
+            if (candidate.length > 5 && candidate.slice(0, 5) === word.slice(0, 5)) score += 1;
+          }
+        }
       }
     }
     if (score > bestScore) {

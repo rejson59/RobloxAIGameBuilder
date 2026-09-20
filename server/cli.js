@@ -43,7 +43,7 @@ const API_KEY_ENV = {
 };
 
 function parseArgs(argv) {
-  const args = { formats: 'zip,rbxmx,plugin,rojo' };
+  const args = { formats: 'zip,rbxmx,place,plugin,rojo' };
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (!token.startsWith('--')) continue;

@@ -237,3 +237,80 @@ export function repairPrompt(brokenText, error) {
     `Pamiętaj: nowe linie w kodzie Luau muszą być zapisane jako \\n, cudzysłowy jako \\", backslash jako \\\\.\n\n` +
     `POPRZEDNIA ODPOWIEDŹ (może być ucięta):\n${String(brokenText).slice(0, 40000)}`;
 }
+
+/* ------------------------------------------------------------------ *
+ * Etapy naprawy i dopracowywania (auto-repair + "poproś o zmianę")
+ * ------------------------------------------------------------------ */
+
+/** Zwięzły kontrakt projektu: pliki, eksporty, remoty – kontekst dla modelu. */
+export function projectContract(project) {
+  const plan = project.plan || {};
+  const files = (project.files || []).map((file) => {
+    const meta = (plan.files || []).find((f) => f.path === file.path) || {};
+    return `- ${file.path} [${meta.kind || 'module'}] ${meta.purpose || ''}` +
+      (meta.exports?.length ? ` | eksportuje: ${meta.exports.join(', ')}` : '');
+  }).join('\n');
+  const remotes = (plan.remoteEvents || []).map((r) => `- ${r.name} (${r.direction}): ${r.payload}`).join('\n');
+  return `NAZWA GRY: ${project.name}\nGATUNEK: ${project.genre || project.design?.genre || '—'}\n` +
+    `OPIS: ${project.summary || ''}\n\nPLIKI:\n${files}\n\nREMOTE EVENTY:\n${remotes || '- (brak)'}`;
+}
+
+export const REPAIR_SYSTEM = `
+Jesteś inżynierem, który naprawia błędy w kodzie Luau dla Roblox Studio.
+Dostajesz: kontrakt projektu, treść plików z błędami oraz listę wykrytych problemów.
+Zwracasz TYLKO poprawione pliki (pełna treść każdego) w formacie JSON:
+
+{ "files": [ { "path": "src/...", "content": "pełny, poprawiony kod" } ], "notes": ["co zmieniłeś"] }
+
+Zasady:
+- Popraw WSZYSTKIE wskazane problemy, nie zmieniaj architektury ani nazw, których używają inne pliki.
+- Zachowaj istniejące API modułów (nazwy eksportowanych funkcji i pól) – inne pliki ich używają.
+- Nie dodawaj nowych plików. Nie usuwaj funkcjonalności. Kod musi być kompletny i uruchamialny.
+${LUAU_RULES}
+`.trim();
+
+export function repairFilesPrompt({ project, brokenFiles, issues }) {
+  const contents = brokenFiles.map((file) => `### ${file.path}\n\`\`\`lua\n${file.content}\n\`\`\``).join('\n\n');
+  const issueList = issues.map((issue) => `- ${issue}`).join('\n');
+  return `${projectContract(project)}\n\n` +
+    `PROBLEMY WYKRYTE PRZEZ WALIDATOR:\n${issueList}\n\n` +
+    `PEŁNA TREŚĆ PLIKÓW DO NAPRAWY:\n${contents}\n\n` +
+    `Zwróć JSON z poprawionymi wersjami TYCH plików.`;
+}
+
+export const REFINE_SYSTEM = `
+Jesteś game developerem Robloxa. Dostajesz istniejący, działający projekt gry (kod Luau, design)
+oraz prośbę gracza o zmianę. Twoim zadaniem jest zaimplementować zmianę tak, aby projekt nadal działał
+od pierwszego uruchomienia i pozostał spójny.
+
+Zwracasz TYLKO JSON:
+{
+  "summary": "co zmieniłeś (1-2 zdania, po polsku)",
+  "files": [ { "path": "src/...", "content": "PEŁNA nowa treść pliku (nie fragment!)" } ],
+  "removed": [ "src/sciezka/do/usuniecia.luau" ],
+  "notes": ["krótka uwaga dla gracza"]
+}
+
+Zasady:
+- Zmieniaj tylko to, co jest potrzebne; pozostałe pliki zostaw (nie musisz ich zwracać).
+- Jeśli plik ma nowy element, zwróć CAŁĄ jego treść – system podmienia plik w całości.
+- Nowe pliki są dozwolone (ścieżki tylko z src/server/, src/client/, src/shared/).
+- Jeśli zmiana wymaga nowych liczb balansu, wrzuć je do Config (src/shared/Config.luau).
+- Jeśli dodajesz RemoteEvent, dodaj go do planu w kodzie (serwer tworzy, klient czeka na WaitForChild).
+${LUAU_RULES}
+`.trim();
+
+export function refinePrompt({ project, instruction, options = {} }) {
+  const fileContents = (project.files || [])
+    .map((file) => `### ${file.path}\n\`\`\`lua\n${file.content}\n\`\`\``)
+    .join('\n\n')
+    .slice(0, 240000);
+  const design = project.design
+    ? `DESIGN (skrót): gatunek=${project.design.genre || ''}; pętla=${project.design.coreLoop || ''}; systemy=${(project.design.systems || []).map((s) => s.name).join(', ')}`
+    : '';
+  return `${projectContract(project)}\n\n${design}\n\n` +
+    `PROŚBA GRACZA O ZMIANĘ:\n"""${instruction}"""\n\n` +
+    (options.language === 'en' ? 'Język tekstów w grze: angielski.\n' : 'Język tekstów w grze: polski.\n') +
+    `OBECNY KOD PROJEKTU:\n${fileContents}\n\n` +
+    `Zaimplementuj zmianę i zwróć JSON zgodnie z formatem.`;
+}

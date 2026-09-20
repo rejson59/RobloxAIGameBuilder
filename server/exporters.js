@@ -86,6 +86,18 @@ export function buildPluginSource(project) {
 export function exportAs(project, format = 'zip') {
   const slug = projectSlug(project);
   switch (format) {
+    // Całe miejsce: struktura identyczna jak .rbxmx (usługi w korzeniu),
+    // więc Studio otwiera to jako plik miejsca - tak wygląda build Rojo.
+    case 'place':
+    case 'rbxlx': {
+      const { xml, warnings } = buildRbxmx(project);
+      return {
+        filename: `${slug}.rbxlx`,
+        contentType: 'application/xml; charset=utf-8',
+        body: Buffer.from(xml, 'utf8'),
+        warnings,
+      };
+    }
     case 'rbxmx': {
       const { xml, warnings } = buildRbxmx(project);
       return {

@@ -7,8 +7,8 @@
  */
 import { chat, ProviderError } from './providers.js';
 import {
-  DESIGN_SYSTEM, PLAN_SYSTEM, SCRIPTS_SYSTEM, WORLD_SYSTEM,
-  designPrompt, planPrompt, repairPrompt, scriptsPrompt, worldPrompt,
+  DESIGN_SYSTEM, PLAN_SYSTEM, REFINE_SYSTEM, REPAIR_SYSTEM, SCRIPTS_SYSTEM, WORLD_SYSTEM,
+  designPrompt, planPrompt, refinePrompt, repairFilesPrompt, repairPrompt, scriptsPrompt, worldPrompt,
 } from './prompts.js';
 import { parseJsonLoose } from './util.js';
 import { normalisePath, isValidPath, validateProject } from './validate.js';
@@ -251,10 +251,159 @@ export async function generateGame({ idea, options = {}, config, onEvent, signal
     meta: { createdAt: new Date().toISOString(), scale, provider: config.provider, model: config.model, idea },
   };
 
-  const validation = validateProject(project);
-  project.validation = validation;
-  emit({ type: 'done', message: 'Projekt gotowy.', stats: validation.stats, warnings: validation.warnings, errors: validation.errors });
+  project.validation = validateProject(project);
+  const repaired = await autoRepairProject(project, config, { onEvent: emit, signal, maxRounds: options.autoRepair === false ? 0 : 2 });
+  project.validation = repaired.validation;
+  project.repairs = repaired.rounds;
+  emit({
+    type: 'done',
+    message: repaired.rounds ? `Projekt gotowy (auto-naprawa: ${repaired.rounds} runda/y).` : 'Projekt gotowy.',
+    stats: project.validation.stats,
+    warnings: project.validation.warnings,
+    errors: project.validation.errors,
+  });
   return project;
 }
+
+/* ------------------------------------------------------------------ *
+ * Auto-naprawa: walidator wskazuje błędy, model poprawia pliki.
+ * Pętla kończy się, gdy walidacja jest czysta (albo po maxRounds).
+ * ------------------------------------------------------------------ */
+export async function autoRepairProject(project, config, { onEvent, signal, maxRounds = 2 } = {}) {
+  let validation = project.validation || validateProject(project);
+  if (maxRounds <= 0 || !validation.errors.length) return { validation, rounds: 0 };
+
+  const usage = project.usage || (project.usage = { inputTokens: 0, outputTokens: 0, calls: 0 });
+
+  for (let round = 1; round <= maxRounds; round++) {
+    assertNotCancelled(signal);
+    const targets = [...new Set(validation.errors.map((entry) => String(entry).split(':')[0]))]
+      .filter((filePath) => project.files.some((file) => file.path === filePath));
+    if (!targets.length) break;
+
+    onEvent?.({
+      type: 'stage',
+      stage: 'repair',
+      message: `Naprawiam ${validation.errors.length} błędów (runda ${round}/${maxRounds}): ${targets.map((t) => t.split('/').pop()).join(', ')}`,
+    });
+
+    try {
+      const brokenFiles = project.files.filter((file) => targets.includes(file.path));
+      const out = await callJson({
+        config,
+        system: REPAIR_SYSTEM,
+        stage: 'repair',
+        label: `Poprawiam kod (runda ${round})`,
+        user: repairFilesPrompt({ project, brokenFiles, issues: validation.errors.slice(0, 25) }),
+        maxTokens: 8192,
+        temperature: 0.2,
+        onEvent,
+        signal,
+      });
+      usage.inputTokens += out.usage.inputTokens;
+      usage.outputTokens += out.usage.outputTokens;
+      usage.calls++;
+
+      const produced = Array.isArray(out.data?.files) ? out.data.files : [];
+      let changed = 0;
+      for (const file of produced) {
+        const filePath = normalisePath(file.path);
+        const index = project.files.findIndex((f) => f.path === filePath);
+        const content = typeof file.content === 'string' ? file.content : '';
+        if (index >= 0 && content.trim() && !isValidPath(filePath)) continue;
+        if (index >= 0 && content.trim()) {
+          project.files[index] = { path: filePath, content };
+          changed++;
+        }
+      }
+      validation = validateProject(project);
+      onEvent?.({
+        type: changed ? 'warn' : 'warn',
+        message: changed
+          ? `Auto-naprawa: zaktualizowano ${changed} plik(ów), pozostało błędów: ${validation.errors.length}.`
+          : 'Auto-naprawa: model nie zwrócił poprawnych plików.',
+      });
+      if (!validation.errors.length) break;
+    } catch (err) {
+      if (err instanceof CancelledError || signal?.aborted) throw err;
+      onEvent?.({ type: 'warn', message: `Auto-naprawa nie udała się: ${err.message}` });
+      break;
+    }
+  }
+  return { validation, rounds: maxRounds };
+}
+
+/* ------------------------------------------------------------------ *
+ * Dopracowanie istniejącego projektu ("poproś o zmianę").
+ * Model zwraca tylko zmienione/nowe pliki; reszta zostaje nietknięta.
+ * ------------------------------------------------------------------ */
+export async function refineProject({ project, instruction, config, options = {}, onEvent, signal }) {
+  if (!project || !Array.isArray(project.files) || !project.files.length) {
+    throw new ProviderError('Brak projektu do dopracowania.');
+  }
+  if (!String(instruction || '').trim()) {
+    throw new ProviderError('Opisz, co chcesz zmienić (np. "dodaj sklep i ranking graczy").');
+  }
+  const usage = project.usage || (project.usage = { inputTokens: 0, outputTokens: 0, calls: 0 });
+  const emit = (event) => onEvent?.(event);
+
+  emit({ type: 'stage', stage: 'refine', message: `Wprowadzam zmianę: ${String(instruction).slice(0, 120)}` });
+
+  const out = await callJson({
+    config,
+    system: REFINE_SYSTEM,
+    stage: 'refine',
+    label: 'Przepisuję zmienione pliki...',
+    user: refinePrompt({ project, instruction, options }),
+    maxTokens: 8192,
+    temperature: 0.4,
+    jsonMode: true,
+    onEvent,
+    signal,
+  });
+  usage.inputTokens += out.usage.inputTokens;
+  usage.outputTokens += out.usage.outputTokens;
+  usage.calls++;
+
+  const changed = [];
+  for (const file of out.data?.files || []) {
+    const filePath = normalisePath(file.path);
+    const content = typeof file.content === 'string' ? file.content : '';
+    if (!content.trim()) continue;
+    if (!isValidPath(filePath)) {
+      emit({ type: 'warn', message: `Pominięto plik o niedozwolonej ścieżce: ${file.path}` });
+      continue;
+    }
+    const index = project.files.findIndex((f) => f.path === filePath);
+    if (index >= 0) project.files[index] = { path: filePath, content };
+    else project.files.push({ path: filePath, content });
+    changed.push(filePath);
+  }
+
+  for (const removedPath of out.data?.removed || []) {
+    const filePath = normalisePath(removedPath);
+    const index = project.files.findIndex((f) => f.path === filePath);
+    if (index >= 0) {
+      project.files.splice(index, 1);
+      changed.push(`-${filePath}`);
+    }
+  }
+
+  if (!changed.length) {
+    emit({ type: 'warn', message: 'Model nie zmienił żadnego pliku — spróbuj opisać zmianę inaczej.' });
+  } else {
+    emit({ type: 'files', message: `Zmienione pliki: ${changed.join(', ')}`, files: project.files.map((f) => f.path) });
+  }
+
+  project.notes = [...(project.notes || []), ...(out.data?.notes || []).map((n) => `[zmiana] ${n}`)];
+  if (out.data?.summary) project.refinements = [...(project.refinements || []), { at: new Date().toISOString(), instruction, summary: out.data.summary }];
+
+  const repaired = await autoRepairProject(project, config, { onEvent: emit, signal, maxRounds: 2 });
+  project.validation = repaired.validation;
+  emit({ type: 'done', message: out.data?.summary ? `Zmiana gotowa: ${out.data.summary}` : 'Zmiana gotowa.', stats: project.validation.stats });
+  return project;
+}
+
+export { callJson };
 
 export { SCALE_PRESETS, CancelledError, describeGroup };

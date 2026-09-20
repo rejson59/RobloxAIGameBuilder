@@ -418,3 +418,91 @@ input:focus, select:focus, textarea:focus {
 
 ol.steps li { margin-bottom: 8px; }
 ol.steps code { font-family: var(--mono); font-size: 12.5px; }
+
+/* ================= v2: chat, biblioteka, wtyczka, ikona ================= */
+.checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 12px 0;
+  font-size: 12.8px;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1.45;
+}
+.checkbox input { accent-color: #00e5a0; margin-top: 2px; width: 15px; height: 15px; }
+
+.library-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; max-height: 320px; overflow: auto; }
+
+.library-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid var(--line);
+  background: #0d1224;
+}
+.library-item .meta { min-width: 0; }
+.library-item strong { display: block; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.library-item span { color: var(--dim); font-size: 11.5px; }
+.library-item .actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+.result-title { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.icon-preview {
+  width: 84px; height: 84px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: #0b0f1e;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.notice { margin: 6px 0 0; }
+.notice:empty { display: none; }
+
+/* czat zmian */
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+  margin-bottom: 14px;
+  padding-right: 4px;
+}
+.chat-bubble {
+  padding: 11px 14px;
+  border-radius: 13px;
+  font-size: 13.5px;
+  max-width: 78%;
+  border: 1px solid var(--line);
+  background: #131834;
+}
+.chat-bubble.user { align-self: flex-end; background: rgba(0, 229, 160, 0.12); border-color: rgba(0,229,160,0.4); }
+.chat-bubble.ai { align-self: flex-start; }
+.chat-bubble .meta { display: block; margin-top: 6px; color: var(--dim); font-size: 11px; }
+.chat-empty { color: var(--dim); font-size: 13px; }
+
+.chat-input { display: flex; flex-direction: column; gap: 10px; }
+.chat-input textarea { font-family: inherit; font-size: 13.8px; }
+
+/* wtyczka */
+.studio-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 22px; }
+@media (max-width: 980px) { .studio-grid { grid-template-columns: minmax(0, 1fr); } }
+.studio-grid h3 { font-size: 14.5px; color: var(--green); margin: 0 0 8px; }
+.code-small { max-height: 340px; font-size: 11.5px; }
+
+.steps { padding-left: 20px; }
+.steps li { margin-bottom: 9px; font-size: 13.6px; color: #cdd4ee; }
+.steps em { color: var(--green); font-style: normal; font-weight: 600; }
+
+.badge-ok { color: var(--green); }
+.badge-warn { color: var(--yellow); }
+.badge-err { color: var(--red); }
+
+.section-title { font-size: 15px; color: var(--green); margin: 18px 0 8px; text-transform: none; letter-spacing: 0; }
+.md table, .tab-panel table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13.4px; }
+.tab-panel table th, .tab-panel table td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; }
+.tab-panel table th { background: rgba(126, 87, 194, 0.14); }

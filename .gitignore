@@ -5,6 +5,9 @@ npm-debug.log*
 .env.*
 *.local
 
+# Biblioteka projektów tworzona w runtime (nie commitujemy Twoich gier)
+.projects/
+
 # Artefakty generowane lokalnie przez CLI (poza katalogiem examples/)
 ai-game/
 moja-gra/
