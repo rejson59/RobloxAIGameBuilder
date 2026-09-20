@@ -4,6 +4,7 @@
  * code, deprecated APIs, ModuleScripts without a return, unbalanced blocks,
  * guessed asset ids and client-side misuse of server-only services.
  */
+import { knownTag } from './assets.js';
 
 const ALLOWED_PREFIXES = ['src/server/', 'src/client/', 'src/shared/', 'src/startergui/', 'src/replicatedstorage/', 'src/workspace/'];
 
@@ -70,6 +71,15 @@ export function lintFile(file) {
   if (!source.trim()) {
     issues.push({ level: 'error', message: 'Pusty plik.' });
     return issues;
+  }
+
+  // Znaczniki assetów: "placeholder:coin" to poprawna konwencja, ale nieznany tag
+  // oznacza, że wtyczka nie ma czym go zastąpić – to warto zgłosić jako ostrzeżenie.
+  for (const match of source.matchAll(/placeholder:([a-z0-9_]+)/gi)) {
+    const tag = match[1].toLowerCase();
+    if (!knownTag(tag)) {
+      issues.push({ level: 'warn', message: `Znacznik "placeholder:${tag}" nie jest na liście tagów – wtyczka go nie podmieni (dozwolone: coin, ui_click, laser, ambient_horror, neon_grid, metal_plate…).` });
+    }
   }
 
   const balance = checkBlockBalance(source);
@@ -161,11 +171,19 @@ export function validateProject(project) {
   if (!requiredKinds.server) warnings.push('Brak pliku *.server.luau – nie ma kodu startowego na serwerze.');
   if (!requiredKinds.client) warnings.push('Brak pliku *.client.luau – gracz nie zobaczy UI ani sterowania specyficznego dla klienta.');
 
+  const placeholderTags = new Set();
+  for (const file of files) {
+    for (const match of String(file.content || '').matchAll(/placeholder:([a-z0-9_]+)/gi)) {
+      placeholderTags.add(match[1].toLowerCase());
+    }
+  }
+
   const stats = {
     files: files.length,
     lines: files.reduce((acc, f) => acc + String(f.content || '').split('\n').length, 0),
     bytes: files.reduce((acc, f) => acc + Buffer.byteLength(String(f.content || ''), 'utf8'), 0),
     worldNodes: flat.length,
+    placeholderTags: placeholderTags.size,
     serverScripts: requiredKinds.server,
     clientScripts: requiredKinds.client,
     modules: files.length - requiredKinds.server - requiredKinds.client,

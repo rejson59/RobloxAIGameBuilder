@@ -652,6 +652,7 @@ function renderStats(project) {
     ['Koszt', cost.usd || cost.usd === 0 ? usd(cost.usd) : '—'],
     ['Audyt', audit.score !== undefined ? `${audit.score}/100` : '—'],
   ];
+  if (stats.placeholderTags) items.push(['Znaczniki assetów', stats.placeholderTags]);
   $('stats').innerHTML = items
     .map(([label, value]) => `<div class="stat"><b>${escapeHtml(String(value))}</b><span>${escapeHtml(label)}</span></div>`)
     .join('');

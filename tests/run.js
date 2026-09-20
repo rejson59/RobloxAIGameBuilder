@@ -747,6 +747,21 @@ await test('assets: znaczniki placeholder:<tag> i dopasowanie do katalogu', () =
   assert.ok(used.find((entry) => entry.tag === 'coin').asset);
 });
 
+await test('walidator: znaczniki placeholder:<tag> są dozwolone, ale tylko z listy', () => {
+  const known = { path: 'src/server/A.server.luau', content: 'local s = Instance.new("Sound")\ns.SoundId = "placeholder:coin"\nprint("ok")\n' };
+  const unknown = { path: 'src/server/B.server.luau', content: 'local s = Instance.new("Sound")\ns.SoundId = "placeholder:zupelnie_wymyslony"\nprint("ok")\n' };
+
+  const okProject = { name: 'T', files: [{ path: 'src/shared/Config.luau', content: 'return {}\n' }, known], plan: {}, design: {} };
+  const okValidation = validateProject(okProject);
+  assert.equal(okValidation.errors.length, 0);
+  assert.ok(!okValidation.warnings.some((w) => w.includes('placeholder')), 'znany tag nie może dawać ostrzeżenia');
+  assert.equal(okValidation.stats.placeholderTags, 1);
+
+  const badValidation = validateProject({ name: 'T2', files: [{ path: 'src/shared/Config.luau', content: 'return {}\n' }, unknown], plan: {}, design: {} });
+  assert.ok(badValidation.warnings.some((w) => w.includes('placeholder:zupelnie_wymyslony')), 'nieznany tag powinien ostrzegać');
+  assert.equal(badValidation.errors.length, 0, 'nieznany tag to ostrzeżenie, nie błąd');
+});
+
 await test('studioPaths: pliki trafiają do właściwych instancji', () => {
   const cases = [
     ['src/server/Bootstrap.server.luau', 'ServerScriptService', 'Script', 'ServerScriptService.Bootstrap'],

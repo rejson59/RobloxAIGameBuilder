@@ -75,6 +75,13 @@ export const GENRE_TAGS = {
 /** `placeholder:tag` – the convention the AI is asked to use. */
 export const PLACEHOLDER_PREFIX = 'placeholder:';
 
+/** Wszystkie tagi, które wtyczka potrafi podmienić na asset. */
+export const ALL_TAGS = new Set(CATALOG.flatMap((entry) => entry.tags.map((tag) => tag.toLowerCase())));
+
+export function knownTag(tag) {
+  return ALL_TAGS.has(String(tag || '').toLowerCase().trim());
+}
+
 export function tagOf(value) {
   const text = String(value || '');
   const index = text.indexOf(PLACEHOLDER_PREFIX);
